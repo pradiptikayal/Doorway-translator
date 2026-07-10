@@ -6,62 +6,87 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Modality } from "@google/genai";
 import dotenv from "dotenv";
 
-//dotenv.config();
 const projectRoot = process.cwd();
 dotenv.config({ path: path.resolve(projectRoot, ".env") });
 dotenv.config({ path: path.resolve(projectRoot, ".env.local"), override: true });
 
-// Helper to build robust translator system instructions
-function buildSystemInstruction(langA: string, langB: string): string {
-  return `You are "Doorway", a highly professional, polite, and completely transparent ambient real-time translation assistant designed for two people having an in-person conversation in different languages: Language A is "${langA}" and Language B is "${langB}".
+interface RoomParticipant {
+  ws: WebSocket;
+  role: "A" | "B";
+  id: string;
+}
 
-You are connected to a continuous bidirectional live audio and video stream of their conversation.
+interface RoomState {
+  roomId: string;
+  participants: Map<string, RoomParticipant>;
+  languageA: string;
+  languageB: string;
+  sessions?: {
+    aToB: any;
+    bToA: any;
+  };
+}
 
-Your absolute highest-priority guidelines are:
-1. Continuous Ambient Translation:
-- Listen continuously to both speakers. Do not engage in a normal helper assistant chat. Your sole purpose is translation.
-- If you hear Language A ("${langA}"), immediately translate it to Language B ("${langB}") and speak the translation in Language B.
-- If you hear Language B ("${langB}"), immediately translate it to Language A ("${langA}") and speak the translation in Language A.
-- Speak ONLY the translations or the necessary ambient clarifying phrases. Do not say "Here is your translation:" or "Translated text:". Speak the translation directly, as if you are the voice of the speaker.
+const rooms = new Map<string, RoomState>();
 
-2. Proactive Clarification:
-- If the speaker's audio is muffled, mumbled, too quiet, has overlapping voices (both speaking at once), or uses highly ambiguous/unclear idioms, DO NOT GUESS.
-- Instead, politely interrupt the conversation and ask the relevant speaker to repeat themselves, speaking in their own language.
-  * E.g., if Language A was mumbled: "Excuse me, I couldn't catch that. Could you please repeat that?" (spoken in "${langA}")
-  * E.g., if Language B was mumbled: "Excuse me, I couldn't catch that. Could you please repeat that?" (spoken in "${langB}")
+function buildSystemInstruction(langA: string, langB: string, direction: "A_TO_B" | "B_TO_A") {
+  const from = direction === "A_TO_B" ? langA : langB;
+  const to = direction === "A_TO_B" ? langB : langA;
+  return `You are Doorway, a live translation assistant. Translate naturally from ${from} to ${to}. Use the listener's live video frames as context for confusion. If the listener looks confused, slow down, simplify, and rephrase. Respond only with the translated spoken output.`;
+}
 
-3. Confusion Detection (via Video Stream):
-- You receive live video frames of the listeners. Watch their faces closely.
-- If the listener looks confused, lost, or displays signs of misunderstanding (such as frowning, knitting their brows, hesitating, or tilting their head in confusion) while the speaker is talking or right after a translation:
-  * PROACTIVELY adjust your next translation.
-  * Speak slower, with clear diction.
-  * Simplify the vocabulary and sentence structure.
-  * Offer a brief, helpful clarifying rephrase or short parenthetical explanation to ensure they understand.
-  * E.g., instead of a complex word, use simple words, or add: "meaning, they want to..."
+async function createTranslationSession(ai: GoogleGenAI, langA: string, langB: string, direction: "A_TO_B" | "B_TO_A", room: RoomState) {
+  const targetRole = direction === "A_TO_B" ? "B" : "A";
 
-4. Idiom Handling:
-- When a speaker uses an idiom, metaphor, or phrase that does not translate literally or cleanly, DO NOT force a literal translation.
-- Instead, say: "That phrase doesn't translate directly — they said something like '[Literal idea]', which roughly means '[True meaning]'". Speak this explanation in the listener's language.
+  return ai.live.connect({
+    model: "gemini-3.1-flash-live-preview",
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+      },
+      systemInstruction: buildSystemInstruction(langA, langB, direction),
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+    },
+    callbacks: {
+      onmessage: (message: any) => {
+        const parts = message.serverContent?.modelTurn?.parts ?? [];
+        const audio = parts.find((part: any) => part.inlineData?.data)?.inlineData?.data;
+        const text = parts
+          .map((part: any) => part.text)
+          .filter(Boolean)
+          .join("");
 
-5. Directness and Modality:
-- Keep translations natural, conversational, and direct.
-- Speak in a calm, clear, and professional tone.
-- Since you are translating in-person conversation, make sure your spoken translation matches the context and conveys the exact emotional tone (polite, excited, concerned) of the original speaker, but with absolute clarity.`;
+        const targetParticipant = Array.from(room.participants.values()).find((participant) => participant.role === targetRole);
+
+        if (audio && targetParticipant) {
+          targetParticipant.ws.send(JSON.stringify({ type: "audio", data: audio }));
+        }
+
+        if (text && targetParticipant) {
+          targetParticipant.ws.send(JSON.stringify({ type: "transcript", sender: "model", text }));
+        }
+      },
+      onclose: () => {
+        console.log(`Session ${direction} closed`);
+      },
+      onerror: (err: any) => {
+        console.error(`Session ${direction} error`, err);
+      },
+    },
+  });
 }
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Simple health check endpoint
-  app.get("/api/health", (req, res) => {
+  app.get("/api/health", (_req, res) => {
     res.json({ status: "ok" });
   });
 
-  // Create standard HTTP server to bind both Express and WebSocket
   const server = http.createServer(app);
-
-  // Set up WebSocket server
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (request, socket, head) => {
@@ -77,109 +102,97 @@ async function startServer() {
 
   wss.on("connection", (clientWs: WebSocket) => {
     console.log("New WebSocket client connected");
-    let session: any = null;
 
     clientWs.on("message", async (messageBuffer) => {
       try {
         const rawData = messageBuffer.toString();
         const msg = JSON.parse(rawData);
 
-        if (msg.type === "setup") {
-          const { languageA, languageB } = msg;
-          console.log(`Setting up Gemini Live session: Language A = ${languageA}, Language B = ${languageB}`);
-
-          // Validate API key exists before initialization
+        if (msg.type === "join_room") {
           const apiKey = process.env.GEMINI_API_KEY;
           if (!apiKey) {
-            throw new Error("GEMINI_API_KEY environment variable is not set on the server.");
+            clientWs.send(JSON.stringify({ type: "error", error: "GEMINI_API_KEY environment variable is not set on the server." }));
+            return;
           }
 
-          // Lazy initialization of GoogleGenAI
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: {
-              headers: {
-                "User-Agent": "aistudio-build",
-              }
-            }
-          });
+          const roomId = String(msg.roomId || "default-room");
+          const role = msg.role === "B" ? "B" : "A";
+          const languageA = msg.languageA || "English";
+          const languageB = msg.languageB || "Hindi";
 
-          const systemInstructionText = buildSystemInstruction(languageA, languageB);
+          let room = rooms.get(roomId);
+          if (!room) {
+            room = {
+              roomId,
+              participants: new Map(),
+              languageA,
+              languageB,
+            };
+            rooms.set(roomId, room);
+          }
 
-          // Connect to Gemini Live API
-          session = await ai.live.connect({
-            model: "gemini-3.1-flash-live-preview",
-            config: {
-              responseModalities: [Modality.AUDIO],
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
-              },
-              systemInstruction: systemInstructionText,
-              inputAudioTranscription: {},
-              outputAudioTranscription: {},
-            },
-            callbacks: {
-              onmessage: (message: any) => {
-                // Forward raw audio chunk (24kHz) to client
-                const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-                if (audio) {
-                  clientWs.send(JSON.stringify({ type: "audio", data: audio }));
-                }
+          if (room.participants.size >= 2) {
+            clientWs.send(JSON.stringify({ type: "error", error: "This room is already full." }));
+            return;
+          }
 
-                // Handle interruption (if user spoke while model speaking)
-                if (message.serverContent?.interrupted) {
-                  clientWs.send(JSON.stringify({ type: "interrupted" }));
-                }
+          const participantId = `${role}-${Date.now()}`;
+          room.participants.set(participantId, { ws: clientWs, role, id: participantId });
 
-                // Forward user input transcription text to client
-                if (message.serverContent?.userTurn?.parts) {
-                  const text = message.serverContent.userTurn.parts
-                    .map((p: any) => p.text)
-                    .filter(Boolean)
-                    .join("");
-                  if (text) {
-                    clientWs.send(JSON.stringify({ type: "transcript", sender: "user", text }));
-                  }
-                }
+          if (!room.languageA || !room.languageB) {
+            room.languageA = languageA;
+            room.languageB = languageB;
+          }
 
-                // Forward model translation text to client
-                if (message.serverContent?.modelTurn?.parts) {
-                  const text = message.serverContent.modelTurn.parts
-                    .map((p: any) => p.text)
-                    .filter(Boolean)
-                    .join("");
-                  if (text) {
-                    clientWs.send(JSON.stringify({ type: "transcript", sender: "model", text }));
-                  }
-                }
-              },
-              onclose: () => {
-                console.log("Gemini Live session closed internally");
-                clientWs.send(JSON.stringify({ type: "status", status: "closed" }));
-              },
-              onerror: (err: any) => {
-                console.error("Gemini Live session error:", err);
-                clientWs.send(JSON.stringify({ type: "error", error: err.message || String(err) }));
-              }
-            }
-          });
-
-          clientWs.send(JSON.stringify({ type: "status", status: "connected" }));
-
-        } else if (msg.type === "audio") {
-          if (session) {
-            // Forward PCM audio chunk (16kHz) to Gemini Live session
-            session.sendRealtimeInput({
-              audio: { data: msg.data, mimeType: "audio/pcm;rate=16000" },
+          const participants = Array.from(room.participants.values());
+          if (participants.length === 2) {
+            const ai = new GoogleGenAI({
+              apiKey,
+              httpOptions: { headers: { "User-Agent": "aistudio-build" } },
             });
-          }
-        } else if (msg.type === "video") {
-          if (session) {
-            // Forward base64 JPEG frame to Gemini Live session
-            session.sendRealtimeInput({
-              video: { data: msg.data, mimeType: "image/jpeg" },
+
+            room.sessions = {
+              aToB: await createTranslationSession(ai, room.languageA, room.languageB, "A_TO_B", room),
+              bToA: await createTranslationSession(ai, room.languageA, room.languageB, "B_TO_A", room),
+            };
+
+            participants.forEach((participant) => {
+              participant.ws.send(JSON.stringify({ type: "room_status", status: "ready" }));
             });
+          } else {
+            clientWs.send(JSON.stringify({ type: "room_status", status: "waiting" }));
           }
+
+          return;
+        }
+
+        if (msg.type === "audio") {
+          const roomId = String(msg.roomId || "default-room");
+          const room = rooms.get(roomId);
+          if (!room || !room.sessions) return;
+          const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
+          if (!sender) return;
+
+          const session = sender.role === "A" ? room.sessions.aToB : room.sessions.bToA;
+          session?.sendRealtimeInput({ audio: { data: msg.data, mimeType: "audio/pcm;rate=16000" } });
+          return;
+        }
+
+        if (msg.type === "video") {
+          const roomId = String(msg.roomId || "default-room");
+          const room = rooms.get(roomId);
+          if (!room || !room.sessions) return;
+          const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
+          if (!sender) return;
+
+          const session = sender.role === "A" ? room.sessions.bToA : room.sessions.aToB;
+          session?.sendRealtimeInput({ video: { data: msg.data, mimeType: "image/jpeg" } });
+          return;
+        }
+
+        if (msg.type === "setup") {
+          clientWs.send(JSON.stringify({ type: "error", error: "Single-device mode is no longer used in this build. Use join_room instead." }));
+          return;
         }
       } catch (err: any) {
         console.error("Error processing client message:", err);
@@ -189,18 +202,35 @@ async function startServer() {
 
     clientWs.on("close", () => {
       console.log("Client WebSocket closed");
-      if (session) {
-        try {
-          session.close();
-          console.log("Gemini Live session closed successfully on client disconnect");
-        } catch (e) {
-          console.error("Error closing Gemini Live session:", e);
+      for (const [roomId, room] of rooms.entries()) {
+        const participantEntry = Array.from(room.participants.entries()).find(([, participant]) => participant.ws === clientWs);
+        if (!participantEntry) continue;
+
+        const [participantId] = participantEntry;
+        room.participants.delete(participantId);
+
+        if (room.sessions) {
+          try {
+            room.sessions.aToB?.close();
+            room.sessions.bToA?.close();
+          } catch (e) {
+            console.error("Error closing room sessions", e);
+          }
         }
+
+        if (room.participants.size === 0) {
+          rooms.delete(roomId);
+        } else {
+          const remainingParticipants = Array.from(room.participants.values());
+          remainingParticipants.forEach((participant) => {
+            participant.ws.send(JSON.stringify({ type: "room_status", status: "waiting" }));
+          });
+        }
+        break;
       }
     });
   });
 
-  // Serve Vite files in development or compiled files in production
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -210,7 +240,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
