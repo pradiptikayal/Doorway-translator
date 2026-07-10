@@ -1,0 +1,6 @@
+{
+  "name": "Doorway",
+  "description": "An ambient live translator for two people having an in-person conversation in different languages, using the Gemini Live API.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
