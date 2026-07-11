@@ -7,38 +7,9 @@ import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Languages, Mic, MicOff, Play, Sparkles, Video, VideoOff, Volume2, Info } from "lucide-react";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import { estimateFacialScores, FaceScores } from "./utils/faceMeshScorer";
-
-interface Utterance {
-  id: string;
-  userText: string;
-  modelText: string;
-  timestamp: Date;
-}
-
-const SUPPORTED_LANGUAGES = [
-  { code: "en", name: "English", nativeName: "English" },
-  { code: "hi", name: "Hindi", nativeName: "हिन्दी" },
-  { code: "es", name: "Spanish", nativeName: "Español" },
-  { code: "zh", name: "Chinese", nativeName: "中文" },
-  { code: "fr", name: "French", nativeName: "Français" },
-  { code: "de", name: "German", nativeName: "Deutsch" },
-  { code: "ja", name: "Japanese", nativeName: "日本語" },
-  { code: "pt", name: "Portuguese", nativeName: "Português" },
-  { code: "it", name: "Italian", nativeName: "Italiano" },
-  { code: "ar", name: "Arabic", nativeName: "العربية" },
-  { code: "ru", name: "Russian", nativeName: "Русский" },
-  { code: "ko", name: "Korean", nativeName: "한국어" },
-  { code: "tr", name: "Turkish", nativeName: "Türkçe" },
-  { code: "nl", name: "Dutch", nativeName: "Nederlands" },
-  { code: "id", name: "Indonesian", nativeName: "Bahasa Indonesia" },
-  { code: "vi", name: "Vietnamese", nativeName: "Tiếng Việt" },
-  { code: "th", name: "Thai", nativeName: "ไทย" },
-];
-
-type SessionState = "setup" | "waiting" | "active";
-type Role = "A" | "B";
-
-type Status = "idle" | "connecting" | "waiting" | "listening" | "translating" | "clarifying" | "error";
+import { Utterance, SessionState, Role, Status } from "./types";
+import { SUPPORTED_LANGUAGES } from "./config/languages";
+import { MetricsDashboard } from "./components/MetricsDashboard";
 
 export default function App() {
   const [langA, setLangA] = useState("English");
@@ -565,41 +536,7 @@ export default function App() {
                 {isCameraMuted && <div className="flex h-56 items-center justify-center text-center text-sm text-stone-500">Camera muted</div>}
               </div>
 
-              {!isCameraMuted && (
-                <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
-                  <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
-                    <Sparkles className="h-3.5 w-3.5 text-stone-700" />
-                    Live Expression Metrics
-                  </h4>
-                  <div className="space-y-3">
-                    <div>
-                      <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
-                        <span>😟 Frown</span>
-                        <span>{Math.round(faceScores.frown * 100)}%</span>
-                      </div>
-                      <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
-                          style={{ width: `${faceScores.frown * 100}%` }}
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
-                        <span>🤔 Hesitation</span>
-                        <span>{Math.round(faceScores.hesitation * 100)}%</span>
-                      </div>
-                      <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
-                          style={{ width: `${faceScores.hesitation * 100}%` }}
-                        />
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-              )}
+              <MetricsDashboard faceScores={faceScores} isCameraMuted={isCameraMuted} />
 
               <div className="mt-4 rounded-2xl border border-stone-200 p-4">
                 <div className="flex items-center gap-2 text-sm text-stone-600">
