@@ -392,7 +392,8 @@ export default function App() {
                 <Languages className="h-7 w-7" />
               </div>
               <h2 className="text-2xl font-semibold text-stone-900">Two-phone live translation</h2>
-              <p className="mt-2 text-sm text-stone-500">Open this page on both phones, use the same room code, and one device can be the English side while the other is the Hindi side.</p>
+              {/* Mirrors the Speaker A/B language selection below, so it never drifts out of sync with the Device role options. */}
+              <p className="mt-2 text-sm text-stone-500">Open this page on both phones, use the same room code, and one device can be the {langA} side while the other is the {langB} side.</p>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
@@ -402,9 +403,10 @@ export default function App() {
               </label>
               <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                 Device role
+                {/* Options track langA/langB directly instead of hardcoded language names, so this always matches whatever the Speaker A/B dropdowns have selected. */}
                 <select value={role} onChange={(event) => setRole(event.target.value as Role)} className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none">
-                  <option value="A">English speaker</option>
-                  <option value="B">Hindi speaker</option>
+                  <option value="A">{langA} speaker</option>
+                  <option value="B">{langB} speaker</option>
                 </select>
               </label>
             </div>
