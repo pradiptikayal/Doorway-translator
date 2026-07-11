@@ -2,6 +2,8 @@ export interface Utterance {
   id: string;
   userText: string;
   modelText: string;
+  fromLang?: string;
+  toLang?: string;
   timestamp: Date;
 }
 

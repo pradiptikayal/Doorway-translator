@@ -14,6 +14,7 @@ export interface RoomParticipant {
 
 export interface RoomState {
   roomId: string;
+  passkey: string;
   participants: Map<string, RoomParticipant>;
   languageA: string;
   languageB: string;

@@ -2,6 +2,7 @@ import { WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
 import { rooms } from "./rooms";
 import { createTranslationSession } from "./gemini";
+import { getClarificationMessage } from "./config";
 
 export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
   const rawData = messageBuffer.toString();
@@ -14,34 +15,61 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
       return;
     }
 
-    const roomId = String(msg.roomId || "default-room");
-    const role = msg.role === "B" ? "B" : "A";
-    const languageA = msg.languageA || "English";
-    const languageB = msg.languageB || "Hindi";
+    const roomId = String(msg.roomId || "default-room").trim().toLowerCase();
+    const action = msg.action || "join";
+    const clientPasskey = msg.passkey ? String(msg.passkey).trim() : "";
+    const myLanguage = msg.myLanguage || "English";
 
     let room = rooms.get(roomId);
-    if (!room) {
+
+    if (action === "create") {
+      if (room && room.participants.size > 0) {
+        clientWs.send(JSON.stringify({ type: "error", error: "A room with this code already exists. Please choose a different code or join it instead." }));
+        return;
+      }
+      const generatedPasskey = Math.floor(100000 + Math.random() * 900000).toString();
       room = {
         roomId,
+        passkey: generatedPasskey,
         participants: new Map(),
-        languageA,
-        languageB,
+        languageA: myLanguage,
+        languageB: "",
       };
       rooms.set(roomId, room);
+    } else {
+      // action === "join"
+      if (!room) {
+        clientWs.send(JSON.stringify({ type: "error", error: "Room not found. Please check the room code or create a new room." }));
+        return;
+      }
+      if (room.passkey !== clientPasskey) {
+        clientWs.send(JSON.stringify({ type: "error", error: "Invalid passcode. Please enter the correct passcode for this room." }));
+        return;
+      }
+      if (room.participants.size >= 2) {
+        clientWs.send(JSON.stringify({ type: "error", error: "This room is already full." }));
+        return;
+      }
     }
 
-    if (room.participants.size >= 2) {
-      clientWs.send(JSON.stringify({ type: "error", error: "This room is already full." }));
-      return;
+    // Assign role dynamically based on vacant slots
+    let role: "A" | "B" = "A";
+    const existingParticipants = Array.from(room.participants.values());
+    if (existingParticipants.length > 0) {
+      const existingRole = existingParticipants[0].role;
+      role = existingRole === "A" ? "B" : "A";
     }
+
+    if (role === "A") {
+      room.languageA = myLanguage;
+    } else {
+      room.languageB = myLanguage;
+    }
+
+    console.log(`[Join Room] Client connected to Room: "${roomId}" (Passcode: ${room.passkey}). Assigned Role: ${role}, Language Selected: "${myLanguage}"`);
 
     const participantId = `${role}-${Date.now()}`;
     room.participants.set(participantId, { ws: clientWs, role, id: participantId });
-
-    if (!room.languageA || !room.languageB) {
-      room.languageA = languageA;
-      room.languageB = languageB;
-    }
 
     const participants = Array.from(room.participants.values());
     if (participants.length === 2) {
@@ -50,16 +78,33 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
         httpOptions: { headers: { "User-Agent": "aistudio-build" } },
       });
 
+      if (!room.languageA) room.languageA = "English";
+      if (!room.languageB) room.languageB = "Hindi";
+
       room.sessions = {
         aToB: await createTranslationSession(ai, room.languageA, room.languageB, "A_TO_B", room),
         bToA: await createTranslationSession(ai, room.languageA, room.languageB, "B_TO_A", room),
       };
 
       participants.forEach((participant) => {
-        participant.ws.send(JSON.stringify({ type: "room_status", status: "ready" }));
+        participant.ws.send(JSON.stringify({
+          type: "room_status",
+          status: "ready",
+          role: participant.role,
+          passkey: room!.passkey,
+          languageA: room!.languageA,
+          languageB: room!.languageB,
+        }));
       });
     } else {
-      clientWs.send(JSON.stringify({ type: "room_status", status: "waiting" }));
+      clientWs.send(JSON.stringify({
+        type: "room_status",
+        status: "waiting",
+        role,
+        passkey: room.passkey,
+        languageA: room.languageA,
+        languageB: room.languageB,
+      }));
     }
 
     return;
@@ -117,10 +162,11 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
     const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
     if (!sender) return;
 
+    const userLang = sender.role === "A" ? room.languageA : room.languageB;
     clientWs.send(
       JSON.stringify({
         type: "clarification",
-        message: "Your speech may be too quiet, noisy, or overlapping. Please repeat more clearly in your native language.",
+        message: getClarificationMessage(userLang, "lowConfidence"),
       }),
     );
     return;
@@ -152,9 +198,10 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
     if (speaker && msg.scores) {
       const { frown, hesitation } = msg.scores;
       if (frown > 0.35 || hesitation > 0.35) {
+        const speakerLang = speaker.role === "A" ? room.languageA : room.languageB;
         speaker.ws.send(JSON.stringify({
           type: "clarification",
-          message: "Your partner seems confused or hesitant. Consider slowing down or clarifying your last point.",
+          message: getClarificationMessage(speakerLang, "confused"),
         }));
       }
     }
@@ -190,7 +237,14 @@ export function handleClose(clientWs: WebSocket) {
     } else {
       const remainingParticipants = Array.from(room.participants.values());
       remainingParticipants.forEach((participant) => {
-        participant.ws.send(JSON.stringify({ type: "room_status", status: "waiting" }));
+        participant.ws.send(JSON.stringify({
+          type: "room_status",
+          status: "waiting",
+          role: participant.role,
+          passkey: room.passkey,
+          languageA: room.languageA,
+          languageB: room.languageB,
+        }));
       });
     }
     break;

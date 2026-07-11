@@ -1,6 +1,6 @@
 import { GoogleGenAI, Modality } from "@google/genai";
 import { RoomState } from "./types";
-import { CLARIFICATION_KEYWORDS } from "./config";
+import { CLARIFICATION_KEYWORDS, getClarificationMessage } from "./config";
 
 export function buildSystemInstruction(langA: string, langB: string, direction: "A_TO_B" | "B_TO_A") {
   const from = direction === "A_TO_B" ? langA : langB;
@@ -64,10 +64,11 @@ export async function createTranslationSession(ai: GoogleGenAI, langA: string, l
         }
 
         if (text && looksLikeClarification(text) && sourceParticipant) {
+          const userLang = sourceParticipant.role === "A" ? room.languageA : room.languageB;
           sourceParticipant.ws.send(
             JSON.stringify({
               type: "clarification",
-              message: "The other participant may need a slower or clearer explanation. Please repeat or rephrase.",
+              message: getClarificationMessage(userLang, "needRephrase"),
             }),
           );
         }

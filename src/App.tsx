@@ -4,17 +4,27 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Languages, Mic, MicOff, Play, Sparkles, Video, VideoOff, Volume2, Info } from "lucide-react";
+import { AlertCircle, Languages, Mic, MicOff, Play, Sparkles, Video, VideoOff, Volume2, Info, Copy, Check, Shuffle, LogIn, Lock } from "lucide-react";
 import { estimateFacialScores, FaceScores } from "./utils/faceMeshScorer";
 import { Utterance, SessionState, Role, Status } from "./types";
 import { SUPPORTED_LANGUAGES } from "./config/languages";
 import { useAudioOutput } from "./hooks/useAudioOutput";
 import { useFaceLandmarker } from "./hooks/useFaceLandmarker";
 
+const ADJECTIVES = ["swift", "clever", "bright", "silent", "warm", "cool", "calm", "bold", "kind", "grand", "mystic", "gentle"];
+const NOUNS = ["panda", "fox", "otter", "breeze", "wave", "peak", "forest", "harbor", "haven", "river", "beacon", "doorway"];
+
+function generateRandomRoomId() {
+  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+  const num = Math.floor(10 + Math.random() * 90);
+  return `${adj}-${noun}-${num}`;
+}
+
 export default function App() {
   const [langA, setLangA] = useState("English");
   const [langB, setLangB] = useState("Hindi");
-  const [roomId, setRoomId] = useState("doorway-room");
+  const [roomId, setRoomId] = useState(() => generateRandomRoomId());
   const [role, setRole] = useState<Role>("A");
 
   const [sessionState, setSessionState] = useState<SessionState>("setup");
@@ -27,6 +37,14 @@ export default function App() {
     timestamp: Date;
   }
   const [liveComments, setLiveComments] = useState<LiveComment[]>([]);
+
+  const [passkey, setPasskey] = useState("");
+  const [roomPasskey, setRoomPasskey] = useState("");
+
+  // New setup states
+  const [setupTab, setSetupTab] = useState<"create" | "join">("create");
+  const [myLanguage, setMyLanguage] = useState("English");
+  const [copied, setCopied] = useState(false);
 
   const [permissionState, setPermissionState] = useState<"prompt" | "granted" | "denied">("prompt");
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -104,27 +122,57 @@ export default function App() {
     }
   };
 
+  const handleRandomizeRoomId = () => {
+    setRoomId(generateRandomRoomId());
+  };
+
+  const handleCopyInvite = () => {
+    const inviteText = `Join my Doorway translation room!\nRoom Code: ${roomId}\nPasscode: ${roomPasskey}\nURL: ${window.location.origin}`;
+    navigator.clipboard.writeText(inviteText).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
   const checkClarification = (text: string) => {
     const lower = text.toLowerCase();
     return lower.includes("repeat") || lower.includes("pardon") || lower.includes("say that again") || lower.includes("didn't catch") || lower.includes("mumbled") || lower.includes("overlapping") || lower.includes("excuse me,");
   };
 
-  const handleIncomingTranscript = (sender: "user" | "model", text: string) => {
+  const handleIncomingTranscript = (sender: "user" | "model", text: string, fromLang?: string, toLang?: string) => {
     const current = [...utterancesRef.current];
     const lastUtterance = current[current.length - 1];
 
     if (sender === "user") {
       if (lastUtterance && lastUtterance.modelText === "" && Date.now() - lastUtterance.timestamp.getTime() < 8000) {
         lastUtterance.userText = (lastUtterance.userText + " " + text).trim();
+        if (fromLang) lastUtterance.fromLang = fromLang;
+        if (toLang) lastUtterance.toLang = toLang;
       } else {
-        current.push({ id: Math.random().toString(36).slice(2, 9), userText: text, modelText: "", timestamp: new Date() });
+        current.push({
+          id: Math.random().toString(36).slice(2, 9),
+          userText: text,
+          modelText: "",
+          fromLang,
+          toLang,
+          timestamp: new Date()
+        });
       }
       setStatus("listening");
     } else {
       if (lastUtterance) {
         lastUtterance.modelText = (lastUtterance.modelText + " " + text).trim();
+        if (fromLang) lastUtterance.fromLang = fromLang;
+        if (toLang) lastUtterance.toLang = toLang;
       } else {
-        current.push({ id: Math.random().toString(36).slice(2, 9), userText: "", modelText: text, timestamp: new Date() });
+        current.push({
+          id: Math.random().toString(36).slice(2, 9),
+          userText: "",
+          modelText: text,
+          fromLang,
+          toLang,
+          timestamp: new Date()
+        });
       }
       setStatus(checkClarification(text) ? "clarifying" : "translating");
     }
@@ -169,6 +217,7 @@ export default function App() {
       }
       wsRef.current = null;
     }
+    setRoomPasskey("");
   };
 
   const startConversation = async () => {
@@ -206,7 +255,13 @@ export default function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "join_room", roomId, role, languageA: langA, languageB: langB }));
+        ws.send(JSON.stringify({
+          type: "join_room",
+          roomId: roomId.trim(),
+          passkey: setupTab === "join" ? passkey.trim() : "",
+          myLanguage,
+          action: setupTab,
+        }));
       };
 
       ws.onmessage = (event) => {
@@ -222,12 +277,17 @@ export default function App() {
               setStatus("waiting");
               setSessionState("waiting");
             }
+
+            if (msg.role) setRole(msg.role);
+            if (msg.passkey) setRoomPasskey(msg.passkey);
+            if (msg.languageA) setLangA(msg.languageA);
+            if (msg.languageB) setLangB(msg.languageB);
           } else if (msg.type === "audio") {
             playAudioChunk(msg.data, () => {
               if (activeAudioSourcesRef.current.length === 0) setStatus("listening");
             });
           } else if (msg.type === "transcript") {
-            handleIncomingTranscript(msg.sender, msg.text);
+            handleIncomingTranscript(msg.sender, msg.text, msg.fromLang, msg.toLang);
           } else if (msg.type === "interrupt") {
             stopActivePlayback();
             setStatus("listening");
@@ -241,6 +301,9 @@ export default function App() {
             console.error("Server reported error", msg.error);
             setErrorMessage(msg.error);
             setStatus("error");
+            cleanupSession();
+            setSessionState("setup");
+            setStatus("idle");
           }
         } catch (err) {
           console.error("Error parsing socket message", err);
@@ -257,12 +320,17 @@ export default function App() {
       ws.onerror = () => {
         setErrorMessage("Lost connection to the Doorway server.");
         setStatus("error");
+        cleanupSession();
+        setSessionState("setup");
+        setStatus("idle");
       };
     } catch (err: any) {
       console.error("Error starting conversation", err);
       setErrorMessage(err.message || String(err));
       setStatus("error");
       cleanupSession();
+      setSessionState("setup");
+      setStatus("idle");
     }
   };
 
@@ -337,6 +405,9 @@ export default function App() {
     setStatus("idle");
   };
 
+  const myActiveLanguage = role === "A" ? langA : langB;
+  const partnerActiveLanguage = role === "A" ? langB : langA;
+
   return (
     <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col font-sans overflow-hidden">
       <header className="border-b border-stone-200 bg-white px-6 py-5 flex items-center justify-between">
@@ -350,9 +421,23 @@ export default function App() {
           </div>
         </div>
         {sessionState !== "setup" && (
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <span className="rounded-full bg-stone-100 px-3 py-1">Room {roomId}</span>
-            <span className="rounded-full bg-stone-100 px-3 py-1">Role {role}</span>
+          <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
+            <span className="rounded-full bg-stone-100 px-3 py-1 flex items-center gap-1.5 text-stone-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-stone-400" />
+              Room: <strong className="text-stone-900">{roomId}</strong>
+            </span>
+            {roomPasskey && (
+              <span className="rounded-full bg-amber-50 border border-amber-200 px-3 py-1 flex items-center gap-1.5 text-amber-800">
+                <Sparkles className="h-3 w-3 text-amber-500 animate-pulse" />
+                Passcode: <strong className="text-amber-950 font-bold tracking-wider">{roomPasskey}</strong>
+              </span>
+            )}
+            <span className="rounded-full bg-stone-100 px-3 py-1 text-stone-600">
+              Me: <strong className="text-stone-900">{myActiveLanguage}</strong>
+            </span>
+            <span className="rounded-full bg-stone-100 px-3 py-1 text-stone-600">
+              Partner: <strong className="text-stone-900">{sessionState === "active" ? partnerActiveLanguage : "Connecting..."}</strong>
+            </span>
           </div>
         )}
       </header>
@@ -384,144 +469,344 @@ export default function App() {
         )}
 
         {sessionState === "setup" ? (
-          <div className="mx-auto flex max-w-3xl flex-col gap-6 rounded-3xl border border-stone-200 bg-white p-8 shadow-sm">
+          <div className="mx-auto flex max-w-lg flex-col gap-6 rounded-3xl border border-stone-200 bg-white p-8 shadow-sm">
             <div className="text-center">
               <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-stone-900 text-white">
                 <Languages className="h-7 w-7" />
               </div>
               <h2 className="text-2xl font-semibold text-stone-900">Two-phone live translation</h2>
-              {/* Mirrors the Speaker A/B language selection below, so it never drifts out of sync with the Device role options. */}
-              <p className="mt-2 text-sm text-stone-500">Open this page on both phones, use the same room code, and one device can be the {langA} side while the other is the {langB} side.</p>
+              <p className="mt-2 text-sm text-stone-500">Bridge two phones in a private room. Speak naturally in your own language, and hear the translation instantly.</p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                Room code
-                <input value={roomId} onChange={(event) => setRoomId(event.target.value)} className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none" />
-              </label>
-              <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                Device role
-                {/* Options track langA/langB directly instead of hardcoded language names, so this always matches whatever the Speaker A/B dropdowns have selected. */}
-                <select value={role} onChange={(event) => setRole(event.target.value as Role)} className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none">
-                  <option value="A">{langA} speaker</option>
-                  <option value="B">{langB} speaker</option>
-                </select>
-              </label>
+            {/* Segmented Tab Selector */}
+            <div className="flex rounded-xl bg-stone-100 p-1 border border-stone-200/50">
+              <button
+                onClick={() => setSetupTab("create")}
+                className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-medium transition-all ${
+                  setupTab === "create"
+                    ? "bg-white text-stone-900 shadow-sm font-semibold"
+                    : "text-stone-500 hover:text-stone-800"
+                }`}
+              >
+                <Sparkles className="h-4 w-4 text-amber-500" />
+                Create Room
+              </button>
+              <button
+                onClick={() => setSetupTab("join")}
+                className={`flex-1 flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-medium transition-all ${
+                  setupTab === "join"
+                    ? "bg-white text-stone-900 shadow-sm font-semibold"
+                    : "text-stone-500 hover:text-stone-800"
+                }`}
+              >
+                <LogIn className="h-4 w-4" />
+                Join Room
+              </button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                Speaker A language
-                <select value={langA} onChange={(event) => setLangA(event.target.value)} className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none">
-                  {SUPPORTED_LANGUAGES.map((lang) => (
-                    <option key={lang.code} value={lang.name} disabled={lang.name === langB}>{lang.name} ({lang.nativeName})</option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                Speaker B language
-                <select value={langB} onChange={(event) => setLangB(event.target.value)} className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none">
-                  {SUPPORTED_LANGUAGES.map((lang) => (
-                    <option key={lang.code} value={lang.name} disabled={lang.name === langA}>{lang.name} ({lang.nativeName})</option>
-                  ))}
-                </select>
-              </label>
+            <div className="space-y-4">
+              {setupTab === "create" ? (
+                <>
+                  <div className="flex flex-col gap-2">
+                    <span className="text-sm font-medium text-stone-700">Room Code</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={roomId}
+                        onChange={(event) => setRoomId(event.target.value.toLowerCase().replace(/\s+/g, "-"))}
+                        className="flex-1 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none font-mono text-stone-800"
+                        placeholder="e.g. swift-haven-48"
+                      />
+                      <button
+                        onClick={handleRandomizeRoomId}
+                        title="Generate random room code"
+                        className="p-3 rounded-2xl border border-stone-200 hover:bg-stone-100 text-stone-500 hover:text-stone-800 transition-colors"
+                      >
+                        <Shuffle className="h-5 w-5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-medium text-stone-700">My Language</label>
+                    <select
+                      value={myLanguage}
+                      onChange={(event) => setMyLanguage(event.target.value)}
+                      className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none text-stone-800"
+                    >
+                      {SUPPORTED_LANGUAGES.map((lang) => (
+                        <option key={lang.code} value={lang.name}>
+                          {lang.name} ({lang.nativeName})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    onClick={() => void startConversation()}
+                    className="mt-2 w-full rounded-full bg-stone-900 hover:bg-stone-800 py-3.5 font-semibold text-white transition-colors"
+                    disabled={permissionState === "denied"}
+                  >
+                    <span className="flex items-center justify-center gap-2">
+                      <Play className="h-4 w-4" />
+                      Create & Join Room
+                    </span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-medium text-stone-700">Room Code</label>
+                    <input
+                      value={roomId}
+                      onChange={(event) => setRoomId(event.target.value.toLowerCase().replace(/\s+/g, "-"))}
+                      className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none font-mono text-stone-800"
+                      placeholder="e.g. swift-haven-48"
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-medium text-stone-700">6-Digit Passcode</label>
+                    <input
+                      value={passkey}
+                      onChange={(event) => setPasskey(event.target.value.trim())}
+                      placeholder="Enter the passcode"
+                      maxLength={6}
+                      className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none font-mono tracking-widest placeholder:font-sans placeholder:tracking-normal text-stone-800"
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-medium text-stone-700">My Language</label>
+                    <select
+                      value={myLanguage}
+                      onChange={(event) => setMyLanguage(event.target.value)}
+                      className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none text-stone-800"
+                    >
+                      {SUPPORTED_LANGUAGES.map((lang) => (
+                        <option key={lang.code} value={lang.name}>
+                          {lang.name} ({lang.nativeName})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    onClick={() => void startConversation()}
+                    className="mt-2 w-full rounded-full bg-stone-900 hover:bg-stone-800 py-3.5 font-semibold text-white transition-colors"
+                    disabled={permissionState === "denied" || !roomId.trim() || !passkey.trim()}
+                  >
+                    <span className="flex items-center justify-center gap-2">
+                      <LogIn className="h-4 w-4" />
+                      Join Room
+                    </span>
+                  </button>
+                </>
+              )}
             </div>
 
-            <button onClick={() => void startConversation()} className="rounded-full bg-stone-900 px-6 py-3 font-semibold text-white" disabled={permissionState === "denied"}>
-              <span className="flex items-center justify-center gap-2">
-                <Play className="h-4 w-4" />
-                Join room
-              </span>
-            </button>
+            {errorMessage && (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 text-center">{errorMessage}</div>
+            )}
           </div>
         ) : (
           <div className="flex h-full flex-col gap-6 lg:flex-row">
-            <div className="flex-1 rounded-3xl border border-stone-200 bg-white p-4 shadow-sm">
+            <div className="flex-1 rounded-3xl border border-stone-200 bg-white p-4 shadow-sm flex flex-col">
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <p className="text-xs uppercase tracking-widest text-stone-400">Conversation</p>
-                  <h3 className="text-lg font-semibold text-stone-900">{sessionState === "waiting" ? "Waiting for the second phone..." : "Live translation"}</h3>
+                  <h3 className="text-lg font-semibold text-stone-900">
+                    {sessionState === "waiting" ? "Connecting room..." : "Live translation"}
+                  </h3>
                 </div>
                 <div className="rounded-full bg-stone-100 px-3 py-1 text-xs font-mono text-stone-600">{status}</div>
               </div>
-              <div className="h-[420px] overflow-y-auto rounded-2xl bg-stone-50 p-4">
-                {utterances.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-center text-sm text-stone-500">
-                    <div>
-                      <Mic className="mx-auto mb-3 h-8 w-8 text-stone-400" />
-                      <p>Speak naturally.</p>
-                      <p className="mt-1 text-xs">Your translated speech and the partner’s translation will appear here.</p>
+
+              {sessionState === "waiting" ? (
+                /* Premium Waiting Dashboard */
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-6 bg-stone-50 rounded-2xl border border-dashed border-stone-200 h-[420px]">
+                  <div className="relative mb-6">
+                    <div className="absolute inset-0 rounded-full bg-stone-950/10 animate-ping" />
+                    <div className="relative flex h-14 w-14 items-center justify-center rounded-full bg-stone-900 text-white shadow-sm">
+                      <Sparkles className="h-6 w-6 animate-pulse text-amber-300" />
                     </div>
                   </div>
-                ) : (
-                  utterances.map((utterance) => (
-                    <div key={utterance.id} className="mb-4 rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
-                      <p className="text-xs uppercase tracking-widest text-stone-400">Spoken</p>
-                      <p className="mt-1 text-sm text-stone-800">{utterance.userText || "Listening..."}</p>
-                      <p className="mt-4 text-xs uppercase tracking-widest text-stone-400">Translated</p>
-                      <p className="mt-1 text-sm text-stone-800">{utterance.modelText || "Waiting for translation..."}</p>
+
+                  <h3 className="text-xl font-semibold text-stone-900">Waiting for your partner...</h3>
+                  <p className="mt-1 text-sm text-stone-500 max-w-sm">
+                    Share these credentials. Once they join with their chosen language, the translator will start.
+                  </p>
+
+                  <div className="mt-6 w-full max-w-md bg-white rounded-2xl border border-stone-200 p-5 shadow-sm space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="flex flex-col text-left">
+                        <span className="text-[10px] uppercase tracking-wider text-stone-400 font-medium">Room Code</span>
+                        <span className="mt-1 font-mono font-bold text-stone-900 bg-stone-100 px-3 py-2 rounded-xl text-center select-all">
+                          {roomId}
+                        </span>
+                      </div>
+                      <div className="flex flex-col text-left">
+                        <span className="text-[10px] uppercase tracking-wider text-stone-400 font-medium">Passcode</span>
+                        <span className="mt-1 font-mono font-extrabold text-amber-950 bg-amber-50 border border-amber-200/50 px-3 py-2 rounded-xl text-center select-all tracking-widest text-lg">
+                          {roomPasskey || "------"}
+                        </span>
+                      </div>
                     </div>
-                  ))
-                )}
-                <div ref={utterancesEndRef} />
-              </div>
+
+                    <button
+                      onClick={handleCopyInvite}
+                      className={`w-full flex items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-semibold border transition-all ${
+                        copied
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : "bg-stone-50 hover:bg-stone-100 border-stone-200 text-stone-700"
+                      }`}
+                    >
+                      {copied ? (
+                        <>
+                          <Check className="h-4 w-4 text-emerald-600" />
+                          Invitation Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-4 w-4" />
+                          Copy Invitation Details
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="mt-6 inline-flex items-center gap-2 bg-stone-100 px-4 py-2 rounded-full text-xs text-stone-600 border border-stone-200/40 font-mono">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>
+                      You are set to speak <strong className="text-stone-900">{myLanguage}</strong>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                /* Active Translation Transcript Log */
+                <div className="h-[420px] overflow-y-auto rounded-2xl bg-stone-50 p-4">
+                  {utterances.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-center text-sm text-stone-500">
+                      <div>
+                        <Mic className="mx-auto mb-3 h-8 w-8 text-stone-400 animate-pulse" />
+                        <p>Speak naturally in {myActiveLanguage}.</p>
+                        <p className="mt-1 text-xs">Your speech and translated output will appear here live.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    utterances.map((utterance) => (
+                      <div key={utterance.id} className="mb-4 rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
+                        <p className="text-xs uppercase tracking-widest text-stone-400">Spoken ({utterance.fromLang || myActiveLanguage})</p>
+                        <p className="mt-1 text-sm text-stone-800">{utterance.userText || "Listening..."}</p>
+                        <p className="mt-4 text-xs uppercase tracking-widest text-stone-400 font-semibold text-stone-600">Translated ({utterance.toLang || partnerActiveLanguage})</p>
+                        <p className="mt-1 text-base text-stone-900 font-medium">{utterance.modelText || "Translating..."}</p>
+                      </div>
+                    ))
+                  )}
+                  <div ref={utterancesEndRef} />
+                </div>
+              )}
             </div>
 
-            <div className="w-full max-w-md rounded-3xl border border-stone-200 bg-white p-4 shadow-sm lg:w-80">
-              <div className="rounded-2xl bg-stone-100 p-3">
-                <video ref={videoRef} muted playsInline className={`h-56 w-full rounded-2xl object-cover ${isCameraMuted ? "hidden" : "block"}`} />
-                {isCameraMuted && <div className="flex h-56 items-center justify-center text-center text-sm text-stone-500">Camera muted</div>}
-              </div>
+            <div className="w-full max-w-md rounded-3xl border border-stone-200 bg-white p-4 shadow-sm lg:w-80 flex flex-col justify-between">
+              <div>
+                <div className="rounded-2xl bg-stone-100 p-3">
+                  <video ref={videoRef} muted playsInline className={`h-56 w-full rounded-2xl object-cover ${isCameraMuted ? "hidden" : "block"}`} />
+                  {isCameraMuted && <div className="flex h-56 items-center justify-center text-center text-sm text-stone-500">Camera muted</div>}
+                </div>
 
-              {/* Partner Status & Live Comment HUD */}
-              <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
-                  <Sparkles className="h-3.5 w-3.5 text-stone-700 animate-pulse" />
-                  Partner Connection Status
-                </h4>
-                {liveComments.length === 0 ? (
-                  <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium bg-emerald-50/50 border border-emerald-100 p-2.5 rounded-xl">
-                    <span className="flex h-2 w-2 rounded-full bg-emerald-500 relative">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    </span>
-                    <span>✨ Partner is following smoothly</span>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {liveComments.map((comment) => (
-                      <div
-                        key={comment.id}
-                        className="flex items-start justify-between gap-2 text-sm text-amber-900 bg-amber-50 border border-amber-100 p-2.5 rounded-xl shadow-sm transition-all duration-300 animate-slide-in"
-                      >
-                        <span>💬 {comment.message}</span>
-                        <button
-                          onClick={() => setLiveComments((prev) => prev.filter((c) => c.id !== comment.id))}
-                          className="text-amber-500 hover:text-amber-700 font-bold px-1.5"
-                          title="Dismiss alert"
-                        >
-                          ×
-                        </button>
+                {!isCameraMuted && (
+                  <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
+                      <Sparkles className="h-3.5 w-3.5 text-stone-700" />
+                      Live Expression Metrics
+                    </h4>
+                    <div className="space-y-3">
+                      <div>
+                        <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
+                          <span>🤔 Frown</span>
+                          <span>{Math.round(faceScores.frown * 100)}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
+                            style={{ width: `${faceScores.frown * 100}%` }}
+                          />
+                        </div>
                       </div>
-                    ))}
+                      <div>
+                        <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
+                          <span>🤨 Hesitation</span>
+                          <span>{Math.round(faceScores.hesitation * 100)}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
+                            style={{ width: `${faceScores.hesitation * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
-              </div>
 
-              <div className="mt-4 rounded-2xl border border-stone-200 p-4">
-                <div className="flex items-center gap-2 text-sm text-stone-600">
-                  <Volume2 className="h-4 w-4" />
-                  <span>Audio is routed to the other phone, and your camera frames help the translation adapt for confusion.</span>
+                {/* Partner Status HUD */}
+                <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-stone-700 animate-pulse" />
+                    Partner Connection Status
+                  </h4>
+                  {liveComments.length === 0 ? (
+                    <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium bg-emerald-50/50 border border-emerald-100 p-2.5 rounded-xl">
+                      <span className="flex h-2 w-2 rounded-full bg-emerald-500 relative">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      </span>
+                      <span>✨ Partner is following smoothly</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {liveComments.map((comment) => (
+                        <div
+                          key={comment.id}
+                          className="flex items-start justify-between gap-2 text-sm text-amber-900 bg-amber-50 border border-amber-100 p-2.5 rounded-xl shadow-sm transition-all duration-300"
+                        >
+                          <span>💬 {comment.message}</span>
+                          <button
+                            onClick={() => setLiveComments((prev) => prev.filter((c) => c.id !== comment.id))}
+                            className="text-amber-500 hover:text-amber-700 font-bold px-1.5"
+                            title="Dismiss alert"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <div className="mt-3 flex items-start gap-2 text-sm text-stone-600">
-                  <Info className="mt-0.5 h-4 w-4" />
-                  <span>Use the same room code on both phones. Your camera is analyzed locally, and only a compact confusion score is sent to the server.</span>
-                </div>
-              </div>
 
-              {errorMessage && (
-                <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{errorMessage}</div>
-              )}
+                <div className="mt-4 rounded-2xl border border-stone-200 p-4">
+                  <div className="flex items-center gap-2 text-sm text-stone-600">
+                    <Volume2 className="h-4 w-4 text-stone-400 shrink-0" />
+                    <span>Audio is routed to the other phone, and your camera frames help the translation adapt for confusion.</span>
+                  </div>
+                  <div className="mt-3 flex items-start gap-2 text-sm text-stone-600 border-t border-stone-100 pt-3">
+                    <Info className="mt-0.5 h-4 w-4 text-stone-400 shrink-0" />
+                    <span>Use the same room code on both phones. The server will bridge the conversation.</span>
+                  </div>
+                  {roomPasskey && sessionState === "active" && (
+                    <div className="mt-3 flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200/50 rounded-xl p-3">
+                      <Sparkles className="mt-0.5 h-4 w-4 text-amber-500 shrink-0 animate-pulse" />
+                      <div>
+                        <span className="font-semibold block text-amber-900">Room Passkey: <code className="font-mono text-base font-bold bg-white px-2 py-0.5 rounded border border-amber-200/60 tracking-widest">{roomPasskey}</code></span>
+                        <span className="text-xs text-amber-700 mt-0.5 block">Your partner enters this passkey to join your room.</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {errorMessage && (
+                  <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{errorMessage}</div>
+                )}
+              </div>
             </div>
           </div>
         )}
