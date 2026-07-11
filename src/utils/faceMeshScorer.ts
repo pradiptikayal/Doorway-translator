@@ -6,6 +6,8 @@
 export interface FaceScores {
   frown: number;
   hesitation: number;
+  smile: number;
+  surprise: number;
 }
 
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
@@ -46,8 +48,26 @@ export const estimateFacialScores = (result: any): FaceScores => {
     0.2 * midJawOpen
   );
 
+  // Smile: mouthSmileLeft, mouthSmileRight
+  const mouthSmileLeft = getBlendshapeScore("mouthSmileLeft");
+  const mouthSmileRight = getBlendshapeScore("mouthSmileRight");
+  const smile = clamp((mouthSmileLeft + mouthSmileRight) / 2);
+
+  // Surprise: eyeWideLeft, eyeWideRight, browOuterUpLeft, browOuterUpRight, jawOpen
+  const eyeWideLeft = getBlendshapeScore("eyeWideLeft");
+  const eyeWideRight = getBlendshapeScore("eyeWideRight");
+  const browOuterUpLeft = getBlendshapeScore("browOuterUpLeft");
+  const browOuterUpRight = getBlendshapeScore("browOuterUpRight");
+  const surprise = clamp(
+    0.4 * ((eyeWideLeft + eyeWideRight) / 2) +
+    0.4 * ((browOuterUpLeft + browOuterUpRight) / 2) +
+    0.2 * jawOpen
+  );
+
   return {
     frown: Math.round(frown * 100) / 100,
     hesitation: Math.round(hesitation * 100) / 100,
+    smile: Math.round(smile * 100) / 100,
+    surprise: Math.round(surprise * 100) / 100,
   };
 };

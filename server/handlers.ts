@@ -2,7 +2,7 @@ import { WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
 import { rooms } from "./rooms";
 import { createTranslationSession } from "./gemini";
-import { getClarificationMessage } from "./config";
+import { getClarificationMessage, getExpressionCommentMessage } from "./config";
 
 export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
   const rawData = messageBuffer.toString();
@@ -155,20 +155,7 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
   }
 
   if (msg.type === "clarification_request") {
-    const roomId = String(msg.roomId || "default-room");
-    const room = rooms.get(roomId);
-    if (!room) return;
-
-    const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
-    if (!sender) return;
-
-    const userLang = sender.role === "A" ? room.languageA : room.languageB;
-    clientWs.send(
-      JSON.stringify({
-        type: "clarification",
-        message: getClarificationMessage(userLang, "lowConfidence"),
-      }),
-    );
+    // Disabled to prevent automatic silence/low-RMS clarification requests from spamming "Please repeat" prompts.
     return;
   }
 
@@ -193,17 +180,70 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
 
     sender.lastScores = msg.scores;
 
-    // Find the active speaker (the other participant)
-    const speaker = Array.from(room.participants.values()).find((p) => p.role !== sender.role);
-    if (speaker && msg.scores) {
-      const { frown, hesitation } = msg.scores;
+    // Find the listener (the other participant)
+    const listener = Array.from(room.participants.values()).find((p) => p.role !== sender.role);
+    if (listener && msg.scores) {
+      const { frown, hesitation, smile, surprise } = msg.scores;
+
+      // Determine the dominant expression
+      let dominantExpr: "smile" | "surprise" | "frown" | "hesitation" | null = null;
+      let maxScore = 0.35; // Threshold for reporting expressions
+
+      if (smile > maxScore) {
+        dominantExpr = "smile";
+        maxScore = smile;
+      }
+      if (surprise > maxScore) {
+        dominantExpr = "surprise";
+        maxScore = surprise;
+      }
+      if (frown > maxScore) {
+        dominantExpr = "frown";
+        maxScore = frown;
+      }
+      if (hesitation > maxScore) {
+        dominantExpr = "hesitation";
+        maxScore = hesitation;
+      }
+
+      if (dominantExpr) {
+        const otherLang = listener.role === "A" ? room.languageA : room.languageB;
+        const commentMessage = getExpressionCommentMessage(otherLang, dominantExpr);
+
+        listener.ws.send(JSON.stringify({
+          type: "partner_expression",
+          expression: dominantExpr,
+          message: commentMessage,
+          timestamp: new Date().toISOString()
+        }));
+      }
+
+      // Also trigger original confusion notification to speaker if frown/hesitation are high
       if (frown > 0.35 || hesitation > 0.35) {
-        const speakerLang = speaker.role === "A" ? room.languageA : room.languageB;
-        speaker.ws.send(JSON.stringify({
+        const speakerLang = listener.role === "A" ? room.languageA : room.languageB;
+        listener.ws.send(JSON.stringify({
           type: "clarification",
           message: getClarificationMessage(speakerLang, "confused"),
         }));
       }
+    }
+    return;
+  }
+
+  if (msg.type === "state_change") {
+    const roomId = String(msg.roomId || "default-room");
+    const room = rooms.get(roomId);
+    if (!room) return;
+    const sender = Array.from(room.participants.values()).find((p) => p.ws === clientWs);
+    if (!sender) return;
+
+    // Find the other participant and forward the state change
+    const other = Array.from(room.participants.values()).find((p) => p.role !== sender.role);
+    if (other) {
+      other.ws.send(JSON.stringify({
+        type: "partner_state",
+        state: msg.state, // "idle" | "speaking" | "listening"
+      }));
     }
     return;
   }

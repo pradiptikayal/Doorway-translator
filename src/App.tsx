@@ -38,6 +38,27 @@ export default function App() {
   }
   const [liveComments, setLiveComments] = useState<LiveComment[]>([]);
 
+  interface PartnerLog {
+    id: string;
+    message: string;
+    timestamp: Date;
+    type: "expression" | "state";
+  }
+
+  const [partnerStatusState, setPartnerStatusState] = useState<"idle" | "speaking" | "listening">("idle");
+  const [partnerLogs, setPartnerLogs] = useState<PartnerLog[]>([]);
+
+  const lastRmsTimeRef = useRef<number>(0);
+  const currentStatusStateRef = useRef<"idle" | "speaking" | "listening">("idle");
+
+  const updateLocalStatusState = (newState: "idle" | "speaking" | "listening") => {
+    if (currentStatusStateRef.current === newState) return;
+    currentStatusStateRef.current = newState;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "state_change", roomId, state: newState }));
+    }
+  };
+
   const [passkey, setPasskey] = useState("");
   const [roomPasskey, setRoomPasskey] = useState("");
 
@@ -66,6 +87,8 @@ export default function App() {
   const [faceScores, setFaceScores] = useState<FaceScores>({
     frown: 0,
     hesitation: 0,
+    smile: 0,
+    surprise: 0,
   });
   const lastSentScoresRef = useRef<FaceScores | null>(null);
 
@@ -218,6 +241,9 @@ export default function App() {
       wsRef.current = null;
     }
     setRoomPasskey("");
+    setPartnerStatusState("idle");
+    setPartnerLogs([]);
+    currentStatusStateRef.current = "idle";
   };
 
   const startConversation = async () => {
@@ -284,8 +310,19 @@ export default function App() {
             if (msg.languageB) setLangB(msg.languageB);
           } else if (msg.type === "audio") {
             playAudioChunk(msg.data, () => {
-              if (activeAudioSourcesRef.current.length === 0) setStatus("listening");
+              if (activeAudioSourcesRef.current.length === 0) {
+                setStatus("listening");
+                updateLocalStatusState("idle");
+              }
             });
+          } else if (msg.type === "partner_state") {
+            setPartnerStatusState(msg.state);
+          } else if (msg.type === "partner_expression") {
+            const logId = `${Date.now()}-${Math.random()}`;
+            setPartnerLogs((prev) => [
+              { id: logId, message: msg.message, timestamp: new Date(), type: "expression" },
+              ...prev.slice(0, 4)
+            ]);
           } else if (msg.type === "transcript") {
             handleIncomingTranscript(msg.sender, msg.text, msg.fromLang, msg.toLang);
           } else if (msg.type === "interrupt") {
@@ -344,6 +381,14 @@ export default function App() {
     processor.onaudioprocess = (event) => {
       if (isMicMuted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
+      // If local speaker playback is active, do NOT stream or process mic input
+      // This completely blocks speaker-microphone echo feedback loop and self-interruptions.
+      const isPlaybackActive = activeAudioSourcesRef.current.length > 0;
+      if (isPlaybackActive) {
+        updateLocalStatusState("listening");
+        return;
+      }
+
       const inputData = event.inputBuffer.getChannelData(0);
       let energy = 0;
       for (let i = 0; i < inputData.length; i += 1) {
@@ -352,14 +397,12 @@ export default function App() {
       }
       const rms = Math.sqrt(energy / inputData.length);
 
-      if (activeAudioSourcesRef.current.length > 0 && rms > 0.08) {
-        stopActivePlayback();
-        wsRef.current.send(JSON.stringify({ type: "interrupt", roomId }));
-      }
-
-      if (rms < 0.015 && Date.now() - lastClarificationRequestAtRef.current > 4000 && !isMicMuted) {
-        lastClarificationRequestAtRef.current = Date.now();
-        wsRef.current.send(JSON.stringify({ type: "clarification_request", roomId, reason: "low_confidence" }));
+      // Track conversational states from speaking volume
+      if (rms > 0.03) {
+        lastRmsTimeRef.current = Date.now();
+        updateLocalStatusState("speaking");
+      } else if (Date.now() - lastRmsTimeRef.current > 1500) {
+        updateLocalStatusState("idle");
       }
 
       const pcmBuffer = new Int16Array(inputData.length);
@@ -390,7 +433,9 @@ export default function App() {
       const last = lastSentScoresRef.current;
       const hasChanged = !last ||
         Math.abs(scores.frown - last.frown) > 0.08 ||
-        Math.abs(scores.hesitation - last.hesitation) > 0.08;
+        Math.abs(scores.hesitation - last.hesitation) > 0.08 ||
+        Math.abs(scores.smile - last.smile) > 0.08 ||
+        Math.abs(scores.surprise - last.surprise) > 0.08;
 
       if (!hasChanged) return;
 
@@ -723,12 +768,36 @@ export default function App() {
                     <div className="space-y-3">
                       <div>
                         <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
+                          <span>😊 Smile</span>
+                          <span>{Math.round(faceScores.smile * 100)}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-600 rounded-full transition-all duration-300 ease-out"
+                            style={{ width: `${faceScores.smile * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
+                          <span>😮 Surprise</span>
+                          <span>{Math.round(faceScores.surprise * 100)}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-indigo-600 rounded-full transition-all duration-300 ease-out"
+                            style={{ width: `${faceScores.surprise * 100}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
                           <span>🤔 Frown</span>
                           <span>{Math.round(faceScores.frown * 100)}%</span>
                         </div>
                         <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
+                            className="h-full bg-amber-600 rounded-full transition-all duration-300 ease-out"
                             style={{ width: `${faceScores.frown * 100}%` }}
                           />
                         </div>
@@ -740,7 +809,7 @@ export default function App() {
                         </div>
                         <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
+                            className="h-full bg-stone-600 rounded-full transition-all duration-300 ease-out"
                             style={{ width: `${faceScores.hesitation * 100}%` }}
                           />
                         </div>
@@ -749,30 +818,73 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Partner Status HUD */}
+                {/* Coordinated Real-Time Interaction Feed */}
                 <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
                     <Sparkles className="h-3.5 w-3.5 text-stone-700 animate-pulse" />
-                    Partner Connection Status
+                    Real-Time Interaction Feed
                   </h4>
-                  {liveComments.length === 0 ? (
-                    <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium bg-emerald-50/50 border border-emerald-100 p-2.5 rounded-xl">
-                      <span className="flex h-2 w-2 rounded-full bg-emerald-500 relative">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+
+                  {/* Partner Conversational State Badge */}
+                  <div className="flex items-center justify-between mb-4 border-b border-stone-200/50 pb-3">
+                    <span className="text-xs font-medium text-stone-500">Partner Status</span>
+                    {partnerStatusState === "speaking" && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-purple-50 border border-purple-200 px-2.5 py-1 text-xs font-semibold text-purple-700 animate-pulse">
+                        <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+                        🎙️ Speaking...
                       </span>
-                      <span>✨ Partner is following smoothly</span>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
+                    )}
+                    {partnerStatusState === "listening" && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 border border-blue-200 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping" />
+                        👂 Listening...
+                      </span>
+                    )}
+                    {partnerStatusState === "idle" && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        ✨ Ready
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Silent Non-Verbal Expression Comments Feed */}
+                  <div className="space-y-3">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">Expression Subtitles ("Not aloud")</span>
+                    {partnerLogs.length === 0 ? (
+                      <div className="text-xs text-stone-400 italic bg-white rounded-xl border border-stone-100 p-3 text-center">
+                        Waiting for partner's expressions...
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-[135px] overflow-y-auto pr-1">
+                        {partnerLogs.map((log) => (
+                          <div
+                            key={log.id}
+                            className="flex items-start justify-between gap-2 text-xs text-stone-700 bg-white border border-stone-100 p-2.5 rounded-xl shadow-xs transition-all duration-300"
+                          >
+                            <span className="font-medium">{log.message}</span>
+                            <span className="text-[9px] text-stone-400 font-mono shrink-0 pt-0.5">
+                              {log.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* High-priority translation prompts (from Gemini model turns) */}
+                  {liveComments.length > 0 && (
+                    <div className="mt-4 pt-3 border-t border-stone-200/50 space-y-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">System Prompts</span>
                       {liveComments.map((comment) => (
                         <div
                           key={comment.id}
-                          className="flex items-start justify-between gap-2 text-sm text-amber-900 bg-amber-50 border border-amber-100 p-2.5 rounded-xl shadow-sm transition-all duration-300"
+                          className="flex items-start justify-between gap-2 text-xs text-amber-950 bg-amber-50 border border-amber-100 p-2.5 rounded-xl shadow-xs"
                         >
-                          <span>💬 {comment.message}</span>
+                          <span className="font-semibold">⚠️ {comment.message}</span>
                           <button
                             onClick={() => setLiveComments((prev) => prev.filter((c) => c.id !== comment.id))}
-                            className="text-amber-500 hover:text-amber-700 font-bold px-1.5"
+                            className="text-amber-500 hover:text-amber-700 font-bold px-1"
                             title="Dismiss alert"
                           >
                             ×

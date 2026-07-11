@@ -106,3 +106,114 @@ export function getClarificationMessage(lang: string, type: "lowConfidence" | "n
   const messages = CLARIFICATION_MESSAGES[normalizedLang] || CLARIFICATION_MESSAGES["English"];
   return messages[type];
 }
+
+export const EXPRESSION_MESSAGES: Record<string, { smile: string; surprise: string; frown: string; hesitation: string }> = {
+  "English": {
+    smile: "Your partner is smiling warmly 😊",
+    surprise: "Your partner looks surprised or intrigued 😮",
+    frown: "Your partner is frowning thoughtfully 🤔",
+    hesitation: "Your partner seems hesitant or deep in thought 🤨"
+  },
+  "Hindi": {
+    smile: "आपका साथी प्यार से मुस्कुरा रहा है 😊",
+    surprise: "आपका साथी हैरान या उत्सुक लग रहा है 😮",
+    frown: "आपका साथी सोच में डूबा हुआ लग रहा है 🤔",
+    hesitation: "आपका साथी थोड़ा संकोचित या विचारมग्न लग रहा है 🤨"
+  },
+  "Spanish": {
+    smile: "Tu compañero sonríe cálidamente 😊",
+    surprise: "Tu compañero parece sorprendido o intrigado 😮",
+    frown: "Tu compañero frunce el ceño pensativamente 🤔",
+    hesitation: "Tu compañero parece dubitativo o pensativo 🤨"
+  },
+  "Italian": {
+    smile: "Il tuo partner sorride calorosamente 😊",
+    surprise: "Il tuo partner sembra sorpreso o incuriosito 😮",
+    frown: "Il tuo partner è accigliato e pensieroso 🤔",
+    hesitation: "Il tuo partner sembra esitante o sopra pensiero 🤨"
+  },
+  "Chinese": {
+    smile: "您的伙伴正温暖地微笑 😊",
+    surprise: "您的伙伴看起来很惊讶或好奇 😮",
+    frown: "您的伙伴正若有所思地皱眉 🤔",
+    hesitation: "您的伙伴似乎有些犹豫或沉思 🤨"
+  },
+  "French": {
+    smile: "Votre partenaire sourit chaleureusement 😊",
+    surprise: "Votre partenaire a l'air surpris ou intrigué 😮",
+    frown: "Votre partenaire fronce les sourcils d'un air pensif 🤔",
+    hesitation: "Votre partenaire semble hésitant ou pensif 🤨"
+  },
+  "German": {
+    smile: "Ihr Partner lächelt warm 😊",
+    surprise: "Ihr Partner sieht überrascht oder neugierig aus 😮",
+    frown: "Ihr Partner runzelt nachdenklich die Stirn 🤔",
+    hesitation: "Ihr Partner wirkt zögerlich oder nachdenklich 🤨"
+  },
+  "Japanese": {
+    smile: "パートナーが温かく微笑んでいます 😊",
+    surprise: "パートナーが驚いているか、興味を惹かれているようです 😮",
+    frown: "パートナーが考え深げに眉をひそめています 🤔",
+    hesitation: "パートナーが少しためらっているか、考え込んでいるようです 🤨"
+  },
+  "Portuguese": {
+    smile: "Seu parceiro está sorrindo calorosamente 😊",
+    surprise: "Seu parceiro parece surpreso ou intrigado 😮",
+    frown: "Seu parceiro está franzindo a testa pensativamente 🤔",
+    hesitation: "Seu parceiro parece hesitante ou pensativo 🤨"
+  },
+  "Arabic": {
+    smile: "شريكك يبتسم بدفء 😊",
+    surprise: "يبدو شريكك متفاجئًا أو مهتمًا 😮",
+    frown: "شريكك يعقد حاجبيه متفكرًا 🤔",
+    hesitation: "يبدو شريكك مترددًا أو مستغرقًا في التفكير 🤨"
+  },
+  "Russian": {
+    smile: "Ваш собеседник тепло улыбается 😊",
+    surprise: "Ваш собеседник выглядит удивленным или заинтригованным 😮",
+    frown: "Ваш собеседник задумчиво хмурится 🤔",
+    hesitation: "Ваш собеседник кажется нерешительным или задумался 🤨"
+  },
+  "Korean": {
+    smile: "상대방이 따뜻하게 미소 짓고 있습니다 😊",
+    surprise: "상대방이 놀라거나 흥미로워하는 것 같습니다 😮",
+    frown: "상대방이 생각에 잠겨 미간을 찌푸리고 있습니다 🤔",
+    hesitation: "상대방이 머뭇거리거나 고민하는 것 같습니다 🤨"
+  },
+  "Turkish": {
+    smile: "Partneriniz sıcak bir şekilde gülümsüyor 😊",
+    surprise: "Partneriniz şaşırmış veya meraklanmış görünüyor 😮",
+    frown: "Partneriniz düşünceli bir şekilde kaşlarını çatıyor 🤔",
+    hesitation: "Partneriniz kararsız veya düşünceli görünüyor 🤨"
+  },
+  "Dutch": {
+    smile: "Uw partner glimlacht hartelijk 😊",
+    surprise: "Uw partner kijkt verrast of geïntrigeerd 😮",
+    frown: "Uw partner fronst nadenkend 🤔",
+    hesitation: "Uw partner lijkt aarzelend of in gedachten verzonken 🤨"
+  },
+  "Indonesian": {
+    smile: "Mitra Anda tersenyum hangat 😊",
+    surprise: "Mitra Anda tampak terkejut atau tertarik 😮",
+    frown: "Mitra Anda mengernyitkan dahi dengan penuh pertimbangan 🤔",
+    hesitation: "Mitra Anda tampak ragu-ragu atau sedang berpikir keras 🤨"
+  },
+  "Vietnamese": {
+    smile: "Đối tác của bạn đang mỉm cười ấm áp 😊",
+    surprise: "Đối tác của bạn trông ngạc nhiên hoặc tò mò 😮",
+    frown: "Đối tác của bạn đang cau mày suy nghĩ 🤔",
+    hesitation: "Đối tác của bạn có vẻ do dự hoặc đang suy nghĩ 🤨"
+  },
+  "Thai": {
+    smile: "คู่สนทนาของคุณกำลังยิ้มอย่างอบอุ่น 😊",
+    surprise: "คู่สนทนาของคุณดูประหลาดใจหรือสนใจ 😮",
+    frown: "คู่สนทนาของคุณกำลังขมวดคิ้วอย่างใช้ความคิด 🤔",
+    hesitation: "คู่สนทนาของคุณดูลังเลหรือกำลังคิดอย่างลึกซึ้ง 🤨"
+  }
+};
+
+export function getExpressionCommentMessage(lang: string, type: "smile" | "surprise" | "frown" | "hesitation"): string {
+  const normalizedLang = lang || "English";
+  const messages = EXPRESSION_MESSAGES[normalizedLang] || EXPRESSION_MESSAGES["English"];
+  return messages[type];
+}
