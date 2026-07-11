@@ -14,6 +14,12 @@ interface RoomParticipant {
   ws: WebSocket;
   role: "A" | "B";
   id: string;
+  lastScores?: {
+    frown: number;
+    hesitation: number;
+  };
+  lastAudioTime?: number;
+  sentScoresForCurrentTurn?: boolean;
 }
 
 interface RoomState {
@@ -32,10 +38,49 @@ const rooms = new Map<string, RoomState>();
 function buildSystemInstruction(langA: string, langB: string, direction: "A_TO_B" | "B_TO_A") {
   const from = direction === "A_TO_B" ? langA : langB;
   const to = direction === "A_TO_B" ? langB : langA;
-  return `You are Doorway, a live translation assistant. Translate naturally from ${from} to ${to}. Use the listener's live video frames as context for confusion. If the listener looks confused, slow down, simplify, and rephrase. Respond only with the translated spoken output.`;
+  return `You are Doorway, a live translation assistant. Translate naturally from ${from} to ${to}.
+You will receive structured facial expression text signals from the listener's camera face analysis in the format: "[Listener Face State: frown=X, hesitation=Y]". Use these signals as context to understand if the listener is confused or struggling.
+If the frown or hesitation scores are elevated (e.g. above 0.35), slow down, simplify your translation vocabulary, and inject a clarifying rephrase in the translation.
+If the audio input is mumbled, noisy, or double-talk occurs, proactively and politely interrupt the conversation in the speaker's native language (${from}) to request a repetition rather than guessing.
+Recognize non-literal or idiomatic phrases and format translations as: "That phrase doesn't translate directly — they said something like X, which roughly means Y."
+Respond only with the translated spoken output or the clarification request.`;
+}
+
+const CLARIFICATION_KEYWORDS = [
+  "repeat",
+  "again",
+  "pardon",
+  "didn't catch",
+  "did not catch",
+  "say that again",
+  "what did you say",
+  "huh",
+  "confused",
+  "mumbled",
+  "overlapping",
+  "excuse me",
+];
+
+function extractTranscriptText(message: any): string {
+  const parts = message.serverContent?.modelTurn?.parts ?? [];
+  const partsText = parts
+    .map((part: any) => part.text)
+    .filter(Boolean)
+    .join(" ");
+
+  return [message.serverContent?.outputTranscription?.text, partsText]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+}
+
+function looksLikeClarification(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return CLARIFICATION_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
 async function createTranslationSession(ai: GoogleGenAI, langA: string, langB: string, direction: "A_TO_B" | "B_TO_A", room: RoomState) {
+  const sourceRole = direction === "A_TO_B" ? "A" : "B";
   const targetRole = direction === "A_TO_B" ? "B" : "A";
 
   return ai.live.connect({
@@ -53,12 +98,10 @@ async function createTranslationSession(ai: GoogleGenAI, langA: string, langB: s
       onmessage: (message: any) => {
         const parts = message.serverContent?.modelTurn?.parts ?? [];
         const audio = parts.find((part: any) => part.inlineData?.data)?.inlineData?.data;
-        const text = parts
-          .map((part: any) => part.text)
-          .filter(Boolean)
-          .join("");
+        const text = extractTranscriptText(message);
 
         const targetParticipant = Array.from(room.participants.values()).find((participant) => participant.role === targetRole);
+        const sourceParticipant = Array.from(room.participants.values()).find((participant) => participant.role === sourceRole);
 
         if (audio && targetParticipant) {
           targetParticipant.ws.send(JSON.stringify({ type: "audio", data: audio }));
@@ -66,6 +109,15 @@ async function createTranslationSession(ai: GoogleGenAI, langA: string, langB: s
 
         if (text && targetParticipant) {
           targetParticipant.ws.send(JSON.stringify({ type: "transcript", sender: "model", text }));
+        }
+
+        if (text && looksLikeClarification(text) && sourceParticipant) {
+          sourceParticipant.ws.send(
+            JSON.stringify({
+              type: "clarification",
+              message: "The other participant may need a slower or clearer explanation. Please repeat or rephrase.",
+            }),
+          );
         }
       },
       onclose: () => {
@@ -173,8 +225,57 @@ async function startServer() {
           const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
           if (!sender) return;
 
+          const now = Date.now();
+          const isNewTurn = !sender.lastAudioTime || (now - sender.lastAudioTime > 2000);
+          sender.lastAudioTime = now;
+
           const session = sender.role === "A" ? room.sessions.aToB : room.sessions.bToA;
+
+          if (isNewTurn) {
+            sender.sentScoresForCurrentTurn = false;
+          }
+
+          if (!sender.sentScoresForCurrentTurn) {
+            // Find the other participant (the listener)
+            const listener = Array.from(room.participants.values()).find((p) => p.role !== sender.role);
+            if (listener && listener.lastScores) {
+              const scores = listener.lastScores;
+              const signalText = `[Listener Face State: frown=${scores.frown.toFixed(2)}, hesitation=${scores.hesitation.toFixed(2)}]`;
+              console.log(`Sending face signal to room ${roomId} session: ${signalText}`);
+              session?.sendRealtimeInput({ text: signalText });
+              sender.sentScoresForCurrentTurn = true;
+            }
+          }
+
           session?.sendRealtimeInput({ audio: { data: msg.data, mimeType: "audio/pcm;rate=16000" } });
+          return;
+        }
+
+        if (msg.type === "interrupt") {
+          const roomId = String(msg.roomId || "default-room");
+          const room = rooms.get(roomId);
+          if (!room) return;
+
+          Array.from(room.participants.values()).forEach((participant) => {
+            participant.ws.send(JSON.stringify({ type: "interrupt" }));
+          });
+          return;
+        }
+
+        if (msg.type === "clarification_request") {
+          const roomId = String(msg.roomId || "default-room");
+          const room = rooms.get(roomId);
+          if (!room) return;
+
+          const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
+          if (!sender) return;
+
+          clientWs.send(
+            JSON.stringify({
+              type: "clarification",
+              message: "Your speech may be too quiet, noisy, or overlapping. Please repeat more clearly in your native language.",
+            }),
+          );
           return;
         }
 
@@ -187,6 +288,29 @@ async function startServer() {
 
           const session = sender.role === "A" ? room.sessions.bToA : room.sessions.aToB;
           session?.sendRealtimeInput({ video: { data: msg.data, mimeType: "image/jpeg" } });
+          return;
+        }
+
+        if (msg.type === "face_expression") {
+          const roomId = String(msg.roomId || "default-room");
+          const room = rooms.get(roomId);
+          if (!room) return;
+          const sender = Array.from(room.participants.values()).find((participant) => participant.ws === clientWs);
+          if (!sender) return;
+
+          sender.lastScores = msg.scores;
+
+          // Find the active speaker (the other participant)
+          const speaker = Array.from(room.participants.values()).find((p) => p.role !== sender.role);
+          if (speaker && msg.scores) {
+            const { frown, hesitation } = msg.scores;
+            if (frown > 0.4 || hesitation > 0.4) {
+              speaker.ws.send(JSON.stringify({
+                type: "clarification",
+                message: "The other participant seems confused or hesitating. Consider slowing down or clarifying your last point.",
+              }));
+            }
+          }
           return;
         }
 

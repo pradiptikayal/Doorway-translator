@@ -5,6 +5,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Languages, Mic, MicOff, Play, Sparkles, Video, VideoOff, Volume2, Info } from "lucide-react";
+import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+import { estimateFacialScores, FaceScores } from "./utils/faceMeshScorer";
 
 interface Utterance {
   id: string;
@@ -58,9 +60,16 @@ export default function App() {
   const audioContextOutputRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const videoIntervalRef = useRef<number | null>(null);
+  const faceAnalysisIntervalRef = useRef<number | null>(null);
+  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const activeAudioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextStartTimeRef = useRef<number>(0);
+  const lastClarificationRequestAtRef = useRef<number>(0);
+  const [faceScores, setFaceScores] = useState<FaceScores>({
+    frown: 0,
+    hesitation: 0,
+  });
+  const lastSentScoresRef = useRef<FaceScores | null>(null);
 
   useEffect(() => {
     utterancesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -100,6 +109,33 @@ export default function App() {
       setPermissionError(err.name === "NotAllowedError" ? "Permission was denied. Please allow camera and microphone access." : err.message || String(err));
     }
   };
+
+  const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+
+  const initializeFaceLandmarker = async () => {
+    if (faceLandmarkerRef.current) return faceLandmarkerRef.current;
+
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
+    faceLandmarkerRef.current = await FaceLandmarker.createFromOptions(
+      vision,
+      {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numFaces: 1,
+        minFaceDetectionConfidence: 0.45,
+        minFacePresenceConfidence: 0.45,
+        minTrackingConfidence: 0.45,
+        outputFaceBlendshapes: true,
+      }
+    );
+
+    return faceLandmarkerRef.current;
+  };
+
+
 
   const checkClarification = (text: string) => {
     const lower = text.toLowerCase();
@@ -169,10 +205,25 @@ export default function App() {
     }
   };
 
+  const stopActivePlayback = () => {
+    if (activeAudioSourcesRef.current.length > 0) {
+      activeAudioSourcesRef.current.forEach((source) => {
+        try {
+          source.stop();
+        } catch (e) {}
+      });
+      activeAudioSourcesRef.current = [];
+    }
+
+    if (audioContextOutputRef.current) {
+      nextStartTimeRef.current = audioContextOutputRef.current.currentTime;
+    }
+  };
+
   const cleanupSession = () => {
-    if (videoIntervalRef.current) {
-      clearInterval(videoIntervalRef.current);
-      videoIntervalRef.current = null;
+    if (faceAnalysisIntervalRef.current) {
+      clearInterval(faceAnalysisIntervalRef.current);
+      faceAnalysisIntervalRef.current = null;
     }
 
     if (audioProcessorRef.current) {
@@ -201,7 +252,7 @@ export default function App() {
       videoRef.current.srcObject = null;
     }
 
-    activeAudioSourcesRef.current = [];
+    stopActivePlayback();
 
     if (wsRef.current) {
       if (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING) {
@@ -234,6 +285,12 @@ export default function App() {
         void videoRef.current.play().catch(() => undefined);
       }
 
+      try {
+        await initializeFaceLandmarker();
+      } catch (error) {
+        console.warn("Face landmarking is unavailable; continuing with translation-only mode.", error);
+      }
+
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${protocol}//${window.location.host}/live`;
       const ws = new WebSocket(wsUrl);
@@ -260,6 +317,12 @@ export default function App() {
             playAudioChunk(msg.data);
           } else if (msg.type === "transcript") {
             handleIncomingTranscript(msg.sender, msg.text);
+          } else if (msg.type === "interrupt") {
+            stopActivePlayback();
+            setStatus("listening");
+          } else if (msg.type === "clarification") {
+            setStatus("clarifying");
+            setErrorMessage(msg.message || "Please slow down or repeat for clarity.");
           } else if (msg.type === "error") {
             console.error("Server reported error", msg.error);
             setErrorMessage(msg.error);
@@ -300,6 +363,23 @@ export default function App() {
       if (isMicMuted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
       const inputData = event.inputBuffer.getChannelData(0);
+      let energy = 0;
+      for (let i = 0; i < inputData.length; i += 1) {
+        const sample = inputData[i];
+        energy += sample * sample;
+      }
+      const rms = Math.sqrt(energy / inputData.length);
+
+      if (activeAudioSourcesRef.current.length > 0 && rms > 0.08) {
+        stopActivePlayback();
+        wsRef.current.send(JSON.stringify({ type: "interrupt", roomId }));
+      }
+
+      if (rms < 0.015 && Date.now() - lastClarificationRequestAtRef.current > 4000 && !isMicMuted) {
+        lastClarificationRequestAtRef.current = Date.now();
+        wsRef.current.send(JSON.stringify({ type: "clarification_request", roomId, reason: "low_confidence" }));
+      }
+
       const pcmBuffer = new Int16Array(inputData.length);
       for (let i = 0; i < inputData.length; i += 1) {
         const sample = Math.max(-1, Math.min(1, inputData[i]));
@@ -317,20 +397,24 @@ export default function App() {
     source.connect(processor);
     processor.connect(audioCtx.destination);
 
-    const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 240;
-    const ctx = canvas.getContext("2d");
+    faceAnalysisIntervalRef.current = window.setInterval(() => {
+      if (isCameraMuted || !videoRef.current || !faceLandmarkerRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      if (videoRef.current.readyState < videoRef.current.HAVE_CURRENT_DATA) return;
 
-    videoIntervalRef.current = window.setInterval(() => {
-      if (isCameraMuted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-      if (videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA && ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, 320, 240);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.5);
-        const base64Video = dataUrl.split(",")[1];
-        wsRef.current.send(JSON.stringify({ type: "video", roomId, data: base64Video }));
-      }
-    }, 1000);
+      const result = faceLandmarkerRef.current.detectForVideo(videoRef.current, performance.now());
+      const scores = estimateFacialScores(result);
+      setFaceScores(scores);
+
+      const last = lastSentScoresRef.current;
+      const hasChanged = !last ||
+        Math.abs(scores.frown - last.frown) > 0.08 ||
+        Math.abs(scores.hesitation - last.hesitation) > 0.08;
+
+      if (!hasChanged) return;
+
+      lastSentScoresRef.current = scores;
+      wsRef.current.send(JSON.stringify({ type: "face_expression", roomId, scores }));
+    }, 1500);
   };
 
   const handleStop = () => {
@@ -476,6 +560,42 @@ export default function App() {
                 {isCameraMuted && <div className="flex h-56 items-center justify-center text-center text-sm text-stone-500">Camera muted</div>}
               </div>
 
+              {!isCameraMuted && (
+                <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-stone-700" />
+                    Live Expression Metrics
+                  </h4>
+                  <div className="space-y-3">
+                    <div>
+                      <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
+                        <span>😟 Frown</span>
+                        <span>{Math.round(faceScores.frown * 100)}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
+                          style={{ width: `${faceScores.frown * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-xs font-medium text-stone-700 mb-1">
+                        <span>🤔 Hesitation</span>
+                        <span>{Math.round(faceScores.hesitation * 100)}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-stone-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-stone-800 rounded-full transition-all duration-300 ease-out"
+                          style={{ width: `${faceScores.hesitation * 100}%` }}
+                        />
+                      </div>
+                    </div>
+
+                  </div>
+                </div>
+              )}
+
               <div className="mt-4 rounded-2xl border border-stone-200 p-4">
                 <div className="flex items-center gap-2 text-sm text-stone-600">
                   <Volume2 className="h-4 w-4" />
@@ -483,7 +603,7 @@ export default function App() {
                 </div>
                 <div className="mt-3 flex items-start gap-2 text-sm text-stone-600">
                   <Info className="mt-0.5 h-4 w-4" />
-                  <span>Use the same room code on both phones. The server will bridge the conversation.</span>
+                  <span>Use the same room code on both phones. Your camera is analyzed locally, and only a compact confusion score is sent to the server.</span>
                 </div>
               </div>
 
