@@ -43,6 +43,9 @@ export default function App() {
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const [passkey, setPasskey] = useState("");
+  const [roomPasskey, setRoomPasskey] = useState("");
+
   const [permissionState, setPermissionState] = useState<"prompt" | "granted" | "denied">("prompt");
   const [permissionError, setPermissionError] = useState<string | null>(null);
   const [isMicMuted, setIsMicMuted] = useState(false);
@@ -209,6 +212,7 @@ export default function App() {
       }
       wsRef.current = null;
     }
+    setRoomPasskey("");
   };
 
   const startConversation = async () => {
@@ -240,7 +244,7 @@ export default function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "join_room", roomId, role, languageA: langA, languageB: langB }));
+        ws.send(JSON.stringify({ type: "join_room", roomId, passkey, role, languageA: langA, languageB: langB }));
       };
 
       ws.onmessage = (event) => {
@@ -255,6 +259,9 @@ export default function App() {
             } else {
               setStatus("waiting");
               setSessionState("waiting");
+            }
+            if (msg.passkey) {
+              setRoomPasskey(msg.passkey);
             }
           } else if (msg.type === "audio") {
             playAudioChunk(msg.data);
@@ -352,9 +359,18 @@ export default function App() {
           </div>
         </div>
         {sessionState !== "setup" && (
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <span className="rounded-full bg-stone-100 px-3 py-1">Room {roomId}</span>
-            <span className="rounded-full bg-stone-100 px-3 py-1">Role {role}</span>
+          <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
+            <span className="rounded-full bg-stone-100 px-3 py-1 flex items-center gap-1.5 text-stone-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-stone-400" />
+              Room: <strong className="text-stone-900">{roomId}</strong>
+            </span>
+            {roomPasskey && (
+              <span className="rounded-full bg-amber-50 border border-amber-200 px-3 py-1 flex items-center gap-1.5 text-amber-800">
+                <Sparkles className="h-3 w-3 text-amber-500 animate-pulse" />
+                Passkey: <strong className="text-amber-950 font-bold tracking-wider">{roomPasskey}</strong>
+              </span>
+            )}
+            <span className="rounded-full bg-stone-100 px-3 py-1 text-stone-600">Role: <strong className="text-stone-900">{role}</strong></span>
           </div>
         )}
       </header>
@@ -396,10 +412,19 @@ export default function App() {
               <p className="mt-2 text-sm text-stone-500">Open this page on both phones, use the same room code, and one device can be the {langA} side while the other is the {langB} side.</p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-3">
               <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                 Room code
                 <input value={roomId} onChange={(event) => setRoomId(event.target.value)} className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none" />
+              </label>
+              <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
+                Passkey
+                <input 
+                  value={passkey} 
+                  onChange={(event) => setPasskey(event.target.value)} 
+                  placeholder="Leave blank to create" 
+                  className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 outline-none font-mono tracking-wider placeholder:font-sans placeholder:tracking-normal" 
+                />
               </label>
               <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
                 Device role
@@ -478,13 +503,22 @@ export default function App() {
 
               <div className="mt-4 rounded-2xl border border-stone-200 p-4">
                 <div className="flex items-center gap-2 text-sm text-stone-600">
-                  <Volume2 className="h-4 w-4" />
+                  <Volume2 className="h-4 w-4 text-stone-400 shrink-0" />
                   <span>Audio is routed to the other phone, and your camera frames help the translation adapt for confusion.</span>
                 </div>
-                <div className="mt-3 flex items-start gap-2 text-sm text-stone-600">
-                  <Info className="mt-0.5 h-4 w-4" />
+                <div className="mt-3 flex items-start gap-2 text-sm text-stone-600 border-t border-stone-100 pt-3">
+                  <Info className="mt-0.5 h-4 w-4 text-stone-400 shrink-0" />
                   <span>Use the same room code on both phones. The server will bridge the conversation.</span>
                 </div>
+                {roomPasskey && (
+                  <div className="mt-3 flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200/50 rounded-xl p-3">
+                    <Sparkles className="mt-0.5 h-4 w-4 text-amber-500 shrink-0 animate-pulse" />
+                    <div>
+                      <span className="font-semibold block text-amber-900">Room Passkey: <code className="font-mono text-base font-bold bg-white px-2 py-0.5 rounded border border-amber-200/60 tracking-widest">{roomPasskey}</code></span>
+                      <span className="text-xs text-amber-700 mt-0.5 block">The other person must enter this passkey to join your room.</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {errorMessage && (

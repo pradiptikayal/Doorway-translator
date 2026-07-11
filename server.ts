@@ -18,6 +18,7 @@ interface RoomParticipant {
 
 interface RoomState {
   roomId: string;
+  passkey: string;
   participants: Map<string, RoomParticipant>;
   languageA: string;
   languageB: string;
@@ -119,16 +120,24 @@ async function startServer() {
           const role = msg.role === "B" ? "B" : "A";
           const languageA = msg.languageA || "English";
           const languageB = msg.languageB || "Hindi";
+          const clientPasskey = msg.passkey ? String(msg.passkey).trim() : "";
 
           let room = rooms.get(roomId);
           if (!room) {
+            const generatedPasskey = Math.floor(100000 + Math.random() * 900000).toString();
             room = {
               roomId,
+              passkey: generatedPasskey,
               participants: new Map(),
               languageA,
               languageB,
             };
             rooms.set(roomId, room);
+          } else {
+            if (room.passkey !== clientPasskey) {
+              clientWs.send(JSON.stringify({ type: "error", error: "Invalid passkey. Please enter the correct passkey for this room." }));
+              return;
+            }
           }
 
           if (room.participants.size >= 2) {
@@ -157,10 +166,10 @@ async function startServer() {
             };
 
             participants.forEach((participant) => {
-              participant.ws.send(JSON.stringify({ type: "room_status", status: "ready" }));
+              participant.ws.send(JSON.stringify({ type: "room_status", status: "ready", passkey: room!.passkey }));
             });
           } else {
-            clientWs.send(JSON.stringify({ type: "room_status", status: "waiting" }));
+            clientWs.send(JSON.stringify({ type: "room_status", status: "waiting", passkey: room.passkey }));
           }
 
           return;
