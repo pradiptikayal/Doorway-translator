@@ -24,10 +24,15 @@ const SUPPORTED_LANGUAGES = [
   { code: "de", name: "German", nativeName: "Deutsch" },
   { code: "ja", name: "Japanese", nativeName: "日本語" },
   { code: "pt", name: "Portuguese", nativeName: "Português" },
+  { code: "it", name: "Italian", nativeName: "Italiano" },
   { code: "ar", name: "Arabic", nativeName: "العربية" },
   { code: "ru", name: "Russian", nativeName: "Русский" },
   { code: "ko", name: "Korean", nativeName: "한국어" },
-  { code: "bn", name: "Bengali", nativeName: "বাংলा" },
+  { code: "tr", name: "Turkish", nativeName: "Türkçe" },
+  { code: "nl", name: "Dutch", nativeName: "Nederlands" },
+  { code: "id", name: "Indonesian", nativeName: "Bahasa Indonesia" },
+  { code: "vi", name: "Vietnamese", nativeName: "Tiếng Việt" },
+  { code: "th", name: "Thai", nativeName: "ไทย" },
 ];
 
 type SessionState = "setup" | "waiting" | "active";
