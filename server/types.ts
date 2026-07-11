@@ -7,6 +7,8 @@ export interface RoomParticipant {
   lastScores?: {
     frown: number;
     hesitation: number;
+    smile: number;
+    surprise: number;
   };
   lastAudioTime?: number;
   sentScoresForCurrentTurn?: boolean;
