@@ -5,11 +5,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Languages, Mic, MicOff, Play, Sparkles, Video, VideoOff, Volume2, Info } from "lucide-react";
-import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 import { estimateFacialScores, FaceScores } from "./utils/faceMeshScorer";
 import { Utterance, SessionState, Role, Status } from "./types";
 import { SUPPORTED_LANGUAGES } from "./config/languages";
-import { MetricsDashboard } from "./components/MetricsDashboard";
+import { useAudioOutput } from "./hooks/useAudioOutput";
+import { useFaceLandmarker } from "./hooks/useFaceLandmarker";
 
 export default function App() {
   const [langA, setLangA] = useState("English");
@@ -20,6 +20,13 @@ export default function App() {
   const [sessionState, setSessionState] = useState<SessionState>("setup");
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  interface LiveComment {
+    id: string;
+    message: string;
+    timestamp: Date;
+  }
+  const [liveComments, setLiveComments] = useState<LiveComment[]>([]);
 
   const [permissionState, setPermissionState] = useState<"prompt" | "granted" | "denied">("prompt");
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -33,19 +40,30 @@ export default function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextInputRef = useRef<AudioContext | null>(null);
-  const audioContextOutputRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const faceAnalysisIntervalRef = useRef<number | null>(null);
-  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
-  const activeAudioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const nextStartTimeRef = useRef<number>(0);
   const lastClarificationRequestAtRef = useRef<number>(0);
+
   const [faceScores, setFaceScores] = useState<FaceScores>({
     frown: 0,
     hesitation: 0,
   });
   const lastSentScoresRef = useRef<FaceScores | null>(null);
+
+  const {
+    audioContextOutputRef,
+    activeAudioSourcesRef,
+    playAudioChunk,
+    stopActivePlayback,
+    closeAudioOutput,
+  } = useAudioOutput();
+
+  const {
+    faceLandmarkerRef,
+    initializeFaceLandmarker,
+    closeFaceLandmarker,
+  } = useFaceLandmarker();
 
   useEffect(() => {
     utterancesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -86,33 +104,6 @@ export default function App() {
     }
   };
 
-  const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
-
-  const initializeFaceLandmarker = async () => {
-    if (faceLandmarkerRef.current) return faceLandmarkerRef.current;
-
-    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm");
-    faceLandmarkerRef.current = await FaceLandmarker.createFromOptions(
-      vision,
-      {
-        baseOptions: {
-          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-          delegate: "GPU"
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-        minFaceDetectionConfidence: 0.45,
-        minFacePresenceConfidence: 0.45,
-        minTrackingConfidence: 0.45,
-        outputFaceBlendshapes: true,
-      }
-    );
-
-    return faceLandmarkerRef.current;
-  };
-
-
-
   const checkClarification = (text: string) => {
     const lower = text.toLowerCase();
     return lower.includes("repeat") || lower.includes("pardon") || lower.includes("say that again") || lower.includes("didn't catch") || lower.includes("mumbled") || lower.includes("overlapping") || lower.includes("excuse me,");
@@ -142,60 +133,6 @@ export default function App() {
     setUtterances(current);
   };
 
-  const playAudioChunk = (base64Audio: string) => {
-    try {
-      if (!audioContextOutputRef.current) {
-        audioContextOutputRef.current = new (window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!)({ sampleRate: 24000 });
-        nextStartTimeRef.current = audioContextOutputRef.current.currentTime;
-      }
-
-      const audioCtx = audioContextOutputRef.current;
-      if (audioCtx.state === "suspended") audioCtx.resume();
-
-      const binary = atob(base64Audio);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-
-      const int16Array = new Int16Array(bytes.buffer);
-      const float32Array = new Float32Array(int16Array.length);
-      for (let i = 0; i < int16Array.length; i += 1) float32Array[i] = int16Array[i] / 32768;
-
-      const audioBuffer = audioCtx.createBuffer(1, float32Array.length, 24000);
-      audioBuffer.getChannelData(0).set(float32Array);
-      const source = audioCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioCtx.destination);
-
-      const currentTime = audioCtx.currentTime;
-      if (nextStartTimeRef.current < currentTime) nextStartTimeRef.current = currentTime;
-      source.start(nextStartTimeRef.current);
-      nextStartTimeRef.current += audioBuffer.duration;
-
-      activeAudioSourcesRef.current.push(source);
-      source.onended = () => {
-        activeAudioSourcesRef.current = activeAudioSourcesRef.current.filter((item) => item !== source);
-        if (activeAudioSourcesRef.current.length === 0) setStatus("listening");
-      };
-    } catch (err) {
-      console.error("Error playing audio chunk", err);
-    }
-  };
-
-  const stopActivePlayback = () => {
-    if (activeAudioSourcesRef.current.length > 0) {
-      activeAudioSourcesRef.current.forEach((source) => {
-        try {
-          source.stop();
-        } catch (e) {}
-      });
-      activeAudioSourcesRef.current = [];
-    }
-
-    if (audioContextOutputRef.current) {
-      nextStartTimeRef.current = audioContextOutputRef.current.currentTime;
-    }
-  };
-
   const cleanupSession = () => {
     if (faceAnalysisIntervalRef.current) {
       clearInterval(faceAnalysisIntervalRef.current);
@@ -214,10 +151,8 @@ export default function App() {
       audioContextInputRef.current = null;
     }
 
-    if (audioContextOutputRef.current) {
-      audioContextOutputRef.current.close().catch(() => undefined);
-      audioContextOutputRef.current = null;
-    }
+    closeAudioOutput();
+    closeFaceLandmarker();
 
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -227,8 +162,6 @@ export default function App() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-
-    stopActivePlayback();
 
     if (wsRef.current) {
       if (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING) {
@@ -290,15 +223,20 @@ export default function App() {
               setSessionState("waiting");
             }
           } else if (msg.type === "audio") {
-            playAudioChunk(msg.data);
+            playAudioChunk(msg.data, () => {
+              if (activeAudioSourcesRef.current.length === 0) setStatus("listening");
+            });
           } else if (msg.type === "transcript") {
             handleIncomingTranscript(msg.sender, msg.text);
           } else if (msg.type === "interrupt") {
             stopActivePlayback();
             setStatus("listening");
           } else if (msg.type === "clarification") {
-            setStatus("clarifying");
-            setErrorMessage(msg.message || "Please slow down or repeat for clarity.");
+            const commentId = `${Date.now()}-${Math.random()}`;
+            setLiveComments((prev) => [...prev, { id: commentId, message: msg.message, timestamp: new Date() }]);
+            setTimeout(() => {
+              setLiveComments((prev) => prev.filter((c) => c.id !== commentId));
+            }, 8000);
           } else if (msg.type === "error") {
             console.error("Server reported error", msg.error);
             setErrorMessage(msg.error);
@@ -536,7 +474,39 @@ export default function App() {
                 {isCameraMuted && <div className="flex h-56 items-center justify-center text-center text-sm text-stone-500">Camera muted</div>}
               </div>
 
-              <MetricsDashboard faceScores={faceScores} isCameraMuted={isCameraMuted} />
+              {/* Partner Status & Live Comment HUD */}
+              <div className="mt-4 rounded-2xl border border-stone-200 p-4 bg-stone-50">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-1.5">
+                  <Sparkles className="h-3.5 w-3.5 text-stone-700 animate-pulse" />
+                  Partner Connection Status
+                </h4>
+                {liveComments.length === 0 ? (
+                  <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium bg-emerald-50/50 border border-emerald-100 p-2.5 rounded-xl">
+                    <span className="flex h-2 w-2 rounded-full bg-emerald-500 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    </span>
+                    <span>✨ Partner is following smoothly</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {liveComments.map((comment) => (
+                      <div
+                        key={comment.id}
+                        className="flex items-start justify-between gap-2 text-sm text-amber-900 bg-amber-50 border border-amber-100 p-2.5 rounded-xl shadow-sm transition-all duration-300 animate-slide-in"
+                      >
+                        <span>💬 {comment.message}</span>
+                        <button
+                          onClick={() => setLiveComments((prev) => prev.filter((c) => c.id !== comment.id))}
+                          className="text-amber-500 hover:text-amber-700 font-bold px-1.5"
+                          title="Dismiss alert"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               <div className="mt-4 rounded-2xl border border-stone-200 p-4">
                 <div className="flex items-center gap-2 text-sm text-stone-600">
