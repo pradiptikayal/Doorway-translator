@@ -151,10 +151,10 @@ export async function handleMessage(clientWs: WebSocket, messageBuffer: any) {
     const speaker = Array.from(room.participants.values()).find((p) => p.role !== sender.role);
     if (speaker && msg.scores) {
       const { frown, hesitation } = msg.scores;
-      if (frown > 0.4 || hesitation > 0.4) {
+      if (frown > 0.35 || hesitation > 0.35) {
         speaker.ws.send(JSON.stringify({
           type: "clarification",
-          message: "The other participant seems confused or hesitating. Consider slowing down or clarifying your last point.",
+          message: "Your partner seems confused or hesitant. Consider slowing down or clarifying your last point.",
         }));
       }
     }
