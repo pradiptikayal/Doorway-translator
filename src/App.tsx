@@ -340,7 +340,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col font-sans select-none overflow-hidden">
+    <div className="min-h-screen bg-stone-50 text-stone-900 flex flex-col font-sans overflow-hidden">
       <header className="border-b border-stone-200 bg-white px-6 py-5 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-stone-900 flex items-center justify-center">
